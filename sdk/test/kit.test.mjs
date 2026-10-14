@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkOutput, checkSettingsOutput, contract, markSearchHits, requiredExports, validateManifest } from "../contract.mjs";
 import { createKino, errorReport, shownSentence, signingLane } from "../kino-shim.mjs";
 import { filterRelevant, shortQuery, sortBySimilarity } from "../kino-rank.mjs";
@@ -3234,7 +3234,7 @@ test("the settings demo validates and its three exports run through call()", asy
   globalThis.kino = kino;
   const scratch = mkdtempSync(join(tmpdir(), "kino-demo-"));
   writeFileSync(join(scratch, "p.mjs"), readFileSync(pluginFile));
-  const plugin = await import(join(scratch, "p.mjs"));
+  const plugin = await import(pathToFileURL(join(scratch, "p.mjs")).href);
   assert.deepEqual(await call(plugin, "settingsStatus", []), { linked: "Sin cuenta: sesión anónima", slow: 42 });
   assert.deepEqual(await call(plugin, "action", ["test"]), { message: "Conexión correcta" });
   assert.deepEqual(await call(plugin, "validateSettings", ['{"email":"sin-arroba"}']), { email: "Escribe un correo válido" });
@@ -3431,7 +3431,7 @@ test("validate() refuses a plugin that declares a section but doesn't export it"
 
 test("run.mjs: section, categories and theme on the demo plugin", async () => {
   const dir = join(here, "section-demo");
-  const plugin = await import(join(dir, "plugin.js"));
+  const plugin = await import(pathToFileURL(join(dir, "plugin.js")).href);
   assert.deepEqual((await call(plugin, "section", ["series"])).tab, "series");
   assert.equal((await call(plugin, "section", [])).tab, "pelis");
   assert.equal((await call(plugin, "categories", [])).length, 3);

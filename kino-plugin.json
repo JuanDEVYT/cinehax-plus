@@ -1,7 +1,7 @@
 {
   "id": "cinehax-plus",
   "name": "CineHax+",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "apiVersion": 6,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -13,6 +13,7 @@
   ],
   "streamHosts": "any",
   "browser": true,
+  "telemetry": true,
   "capabilities": [
     "search",
     "home",
@@ -21,8 +22,67 @@
     "resolve",
     "download"
   ],
+  "section": {
+    "label": "CineHax+"
+  },
+  "theme": {
+    "accent": "#2563EB",
+    "onAccent": "#FFFFFF",
+    "background": "#0B0C14",
+    "surface": "#1B1F2E",
+    "highlight": "#6EE7A8"
+  },
+  "settings": [
+    {
+      "key": "seccion",
+      "label": "Sección y categorías",
+      "type": "section"
+    },
+    {
+      "key": "pestanas",
+      "label": "Pestañas",
+      "type": "select",
+      "hint": "Qué pestañas y categorías muestra Kino",
+      "options": [
+        {
+          "value": "ambas",
+          "label": "Películas y series"
+        },
+        {
+          "value": "peliculas",
+          "label": "Solo películas"
+        },
+        {
+          "value": "series",
+          "label": "Solo series"
+        }
+      ],
+      "default": "ambas"
+    },
+    {
+      "key": "sitio",
+      "label": "Sitio",
+      "type": "section"
+    },
+    {
+      "key": "estado",
+      "label": "Estado",
+      "type": "status"
+    },
+    {
+      "key": "comprobar",
+      "label": "Comprobar que el sitio responde",
+      "type": "action"
+    },
+    {
+      "key": "limpiar",
+      "label": "Borrar la caché",
+      "type": "action",
+      "confirm": "¿Borrar la caché de búsquedas y temporadas?"
+    }
+  ],
   "signature": {
     "authorKey": "f9e9967038ad5b85443c1c990f4f053df85012583cdeb63d097eac19a0e78cea",
-    "value": "7fbfb389951df402ebbb0be03f119266e7d009ae63eba94980ae818027cf40865ffa026bba142fefcad9c021037e9076224902948aef64643ab6d580c567a307"
+    "value": "08cc1db5cc36708563a02b0cea391a9dce0a14a75942c43bda441a517aaf73d5caa0a037f89bff339c6c0d81107e663cc37ff067d09b89a8fd3b62a2d59f4102"
   }
 }

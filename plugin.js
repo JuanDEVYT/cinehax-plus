@@ -2,18 +2,28 @@
 
 // language: JavaScript ES module · file: plugin.js · target: Kino (QuickJS, apiVersion 6)
 // fuente: cinehaxplus.com – SSR, sin login. Player cargado con JS → browser.capture en resolve.
+// El sitio sirve enlaces relativos (/pelicula/…) en la portada, en las rejillas y en las busquedas;
+// los absolutos solo aparecen en los <link> de navegacion. Todo lector acepta las dos formas.
 
 const BASE = "https://cinehaxplus.com";
 
+// La caché dura una semana: el catalogo cambia a diario, pero un titulo o una temporada no.
+const CACHE_MS = 7 * 24 * 3600 * 1000;
+
 // ──────────────────────────────────────────────────────────────
-// HELPERS – URL y slugs
+// HELPERS – URL, refs y texto
 // ──────────────────────────────────────────────────────────────
 
-/** Extrae type+slug de un href como /pelicula/spider-man-2026 */
+/** Un href del sitio (relativo o absoluto) a URL absoluta. */
+function siteUrl(href) {
+  const s = String(href || "");
+  return /^https?:\/\//i.test(s) ? s : BASE + (s.charAt(0) === "/" ? s : "/" + s);
+}
+
+/** Extrae type+slug de un href como /pelicula/spider-man-2026, venga relativo o absoluto. */
 function parseHref(href) {
-  const m = href && href.match(/\/(pelicula|serie)\/([^/#?]+)/);
-  if (!m) return null;
-  return { type: m[1], slug: m[2] };
+  const m = href && String(href).match(/\/(pelicula|serie)\/([^/#?]+)/);
+  return m ? { type: m[1], slug: m[2] } : null;
 }
 
 function buildId(type, slug) {
@@ -28,145 +38,205 @@ function decodeRef(ref) {
   try { return JSON.parse(ref); } catch { return null; }
 }
 
-/** URL de la página de detalle de un título */
-function detailUrl(type, slug) {
-  return `${BASE}/${type}/${slug}`;
-}
-
-/** Extrae el año del slug (termina en -YYYY) */
+/** El año del slug (termina en -YYYY), como texto. */
 function yearFromSlug(slug) {
-  const m = slug.match(/-(\d{4})$/);
-  return m ? parseInt(m[1], 10) : undefined;
+  const m = String(slug || "").match(/-(\d{4})$/);
+  return m ? m[1] : undefined;
+}
+
+const ACCENTS = { á: "a", à: "a", ä: "a", â: "a", é: "e", è: "e", ë: "e", ê: "e", í: "i", ì: "i", ï: "i", î: "i", ó: "o", ò: "o", ö: "o", ô: "o", ú: "u", ù: "u", ü: "u", û: "u", ñ: "n", ç: "c" };
+
+/** Texto a id seguro (^[A-Za-z0-9._~-]{1,128}$): "Películas nuevas" → "peliculas-nuevas". */
+function slugify(value) {
+  const s = String(value || "").toLowerCase().replace(/[áàäâéèëêíìïîóòöôúùüûñç]/g, (c) => ACCENTS[c] || c);
+  return (s.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "fila").slice(0, 60);
+}
+
+function decodeEntities(value) {
+  return String(value)
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+}
+
+/** Texto visible de un trozo de HTML: sin etiquetas, sin saltos, entidades resueltas. */
+function textOf(html) {
+  return decodeEntities(String(html || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+/** Los JSON-LD (schema.org) de una página, aplanados. */
+function jsonLd(html) {
+  const out = [];
+  const re = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/g;
+  let m;
+  while ((m = re.exec(String(html || ""))) !== null) {
+    try {
+      const data = JSON.parse(m[1]);
+      if (Array.isArray(data)) out.push(...data);
+      else if (data && Array.isArray(data["@graph"])) out.push(...data["@graph"]);
+      else if (data) out.push(data);
+    } catch { /* JSON roto: se ignora y se sigue con el HTML */ }
+  }
+  return out;
+}
+
+/** El primer JSON-LD de los tipos dados, o null. */
+function ldOf(html, types) {
+  return jsonLd(html).find((x) => x && types && types.includes(x["@type"])) || null;
+}
+
+/** fetch que no lanza: null cuando el sitio no contesta bien. Nunca registra lo que la persona escribió. */
+async function getText(path) {
+  try {
+    const r = await kino.fetch(siteUrl(path));
+    return r.ok ? r.text() : null;
+  } catch (e) {
+    kino.log("cinehax: fetch fallido", e && e.code ? e.code : "network");
+    return null;
+  }
 }
 
 // ──────────────────────────────────────────────────────────────
-// HELPERS – parseo HTML con regex (funciona en kit y en app)
+// HELPERS – caché, tarjetas y buscador del sitio
 // ──────────────────────────────────────────────────────────────
 
+function cacheGet(key) {
+  try {
+    const raw = kino.storage.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function cacheSet(key, value) {
+  try {
+    const raw = JSON.stringify(value);
+    // La caché del plugin pesa 256 KB en total: una serie grande entra, una lista de series no.
+    if (raw && raw.length < 60000) kino.storage.set(key, raw, { ttlMs: CACHE_MS });
+  } catch { /* llena o no disponible: se sigue sin caché */ }
+}
+
+function cacheDrop(prefix) {
+  try {
+    for (const key of kino.storage.keys()) if (key.startsWith(prefix)) kino.storage.remove(key);
+  } catch { /* nada que borrar */ }
+}
+
 /**
- * Extrae links únicos a /pelicula/ y /serie/ (sin temporada/episodio).
- * Devuelve array de { href, type, slug }
+ * Tarjetas del sitio: <a class="cd"> en rejillas y búsquedas, <a class="t10"> en el Top 10.
+ * Devuelve items con título, año, valoración, duración y la imagen que la tarjeta trae
+ * (la rejilla usa el backdrop; el Top 10 trae el póster vertical).
  */
-function extractTitleLinks(html) {
+function parseCards(html, limit) {
+  const max = limit || 100;
+  const out = [];
   const seen = new Set();
-  const result = [];
-  const re = /href="(https?:\/\/cinehaxplus\.com\/(pelicula|serie)\/([^"#?/]+))"/g;
+  const re = /<a class="(?:cd|t10)" href="([^"]+)">([\s\S]*?)<\/a>/g;
   let m;
-  while ((m = re.exec(html)) !== null) {
-    const href = m[1];
-    const type = m[2];
-    const slug = m[3];
-    const key = `${type}/${slug}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push({ href, type, slug });
+  while ((m = re.exec(String(html || ""))) !== null) {
+    if (out.length >= max) break;
+    const where = parseHref(m[1]);
+    if (!where) continue;
+    const { type, slug } = where;
+    const id = buildId(type, slug);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const block = m[2];
+
+    const titleTag = /<span class="cd-t">([\s\S]*?)<\/span>/.exec(block);
+    const alt = /alt="([^"]*)"/.exec(block);
+    const title = textOf(titleTag ? titleTag[1] : alt ? alt[1] : "") || slug.replace(/-/g, " ");
+
+    const meta = /<span class="cd-m">([\s\S]*)$/.exec(block);
+    const metaText = meta ? meta[1] : "";
+    const ratingM = /(\d{1,3})%/.exec(metaText);
+    const yearM = /<span>(\d{4})<\/span>/.exec(metaText);
+    const runtimeM = /<span>(?:(\d+)h\s*(\d+)?m?|(\d+)m)<\/span>/.exec(metaText);
+    const image = (/<img src="(https:\/\/image\.tmdb\.org\/[^"]+)"/.exec(block) || [])[1];
+
+    const item = {
+      id,
+      ref: encodeRef({ type, slug }),
+      title,
+      kind: type === "pelicula" ? "movie" : "series",
+      year: yearM ? yearM[1] : yearFromSlug(slug),
+      poster: image,
+      backdrop: image,
+    };
+    if (ratingM) item.rating = Number(ratingM[1]) / 10;
+    if (runtimeM) {
+      const minutes = runtimeM[1] ? Number(runtimeM[1]) * 60 + Number(runtimeM[2] || 0) : Number(runtimeM[3] || 0);
+      if (minutes > 0) item.runtimeMinutes = minutes;
     }
+    out.push(item);
   }
-  return result;
+  return out;
 }
 
-/**
- * Extrae texto limpio entre dos tags (simple, sin anidamiento).
- * Usado para sacar sinopsis, título, etc.
- */
-function innerText(html) {
-  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-
-/**
- * Extrae la primera imagen de image.tmdb.org con tamaño w500 de un HTML.
- * Las páginas de detalle incluyen posters de TMDB.
- */
-function extractPoster(html) {
-  const m = html.match(/https:\/\/image\.tmdb\.org\/t\/p\/w500\/([^"']+)/);
-  return m ? `https://image.tmdb.org/t/p/w500/${m[1]}` : undefined;
-}
-
-/**
- * Extrae el backdrop (w1280) de un HTML.
- */
-function extractBackdrop(html) {
-  const m = html.match(/https:\/\/image\.tmdb\.org\/t\/p\/w1280\/([^"']+)/);
-  return m ? `https://image.tmdb.org/t/p/w1280/${m[1]}` : undefined;
-}
-
-/**
- * Extrae géneros de links /genero/slug de un HTML.
- * Devuelve array de ids de género compatibles con Kino.
- */
-const GENRE_MAP = {
-  "accion": "accion", "aventura": "aventura", "animacion": "animacion",
-  "terror": "terror", "comedia": "comedia", "drama": "drama",
-  "romance": "romance", "ciencia-ficcion": "ciencia-ficcion",
-  "crimen": "crimen", "misterio": "misterio", "fantasia": "fantasia",
-  "suspenso": "suspenso", "documental": "documentales", "familia": "familia",
-  "infantil": "infantil", "anime": "anime",
-};
-function extractGenres(html) {
-  const re = /\/genero\/([^"#?/]+)/g;
-  const genres = [];
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const g = GENRE_MAP[m[1]] || m[1];
-    if (!genres.includes(g)) genres.push(g);
+/** El buscador del sitio (/api/suggest): títulos con póster vertical, año y nota. */
+async function suggest(text) {
+  const body = await getText(`${BASE}/api/suggest?q=${encodeURIComponent(text)}`);
+  if (!body) return [];
+  let data;
+  try { data = JSON.parse(body); } catch { return []; }
+  const out = [];
+  for (const t of Array.isArray(data && data.titles) ? data.titles : []) {
+    const where = parseHref(t && t.url);
+    if (!where) continue;
+    out.push({
+      type: where.type,
+      slug: where.slug,
+      title: typeof t.title === "string" && t.title ? t.title : undefined,
+      year: t.year ? String(t.year) : undefined,
+      poster: typeof t.poster === "string" ? t.poster : undefined,
+      rating: typeof t.rating === "number" ? t.rating : undefined,
+    });
   }
-  return genres.length ? genres : undefined;
+  return out;
 }
 
-/** Extrae año de un link /ano/YYYY */
-function extractYear(html) {
-  const m = html.match(/\/ano\/(\d{4})/);
-  return m ? parseInt(m[1], 10) : undefined;
+/** Lo mismo, con caché; si el texto completo no da nada, se prueba con su cabecera ("Avatar: …" → "Avatar"). */
+async function suggestHits(text) {
+  const key = `buscar:${String(text).toLowerCase()}`;
+  const saved = cacheGet(key);
+  if (Array.isArray(saved)) return saved;
+
+  let hits = await suggest(text);
+  if (!hits.length) {
+    const head = kino.rank.shortQuery(text);
+    if (head && head !== text) hits = await suggest(head);
+  }
+  if (hits.length) cacheSet(key, hits);
+  return hits;
 }
 
-/**
- * Construye un item de Kino a partir del slug y el HTML de la página de listado.
- * El título se extrae del textContent si está disponible, si no se infiere del slug.
- */
-function buildItem(type, slug, title) {
-  return {
-    id: buildId(type, slug),
-    ref: encodeRef({ type, slug }),
-    title: title || slug.replace(/-/g, " "),
-    kind: type === "pelicula" ? "movie" : "series",
-    year: yearFromSlug(slug),
+function suggestItem(x) {
+  const item = {
+    id: buildId(x.type, x.slug),
+    ref: encodeRef({ type: x.type, slug: x.slug }),
+    title: x.title || x.slug.replace(/-/g, " "),
+    kind: x.type === "pelicula" ? "movie" : "series",
+    year: x.year || yearFromSlug(x.slug),
+    poster: x.poster,
+    backdrop: x.poster,
   };
+  if (typeof x.rating === "number") item.rating = x.rating;
+  return item;
 }
 
-// ──────────────────────────────────────────────────────────────
-// HELPERS – página de detalle
-// ──────────────────────────────────────────────────────────────
-
-/**
- * Hace fetch de la página de detalle de un título y devuelve un item enriquecido.
- * Incluye poster, backdrop, géneros, año, descripción.
- */
-async function fetchDetail(type, slug) {
-  const r = await kino.fetch(detailUrl(type, slug));
-  if (!r.ok) return buildItem(type, slug, null);
-  const html = await r.text();
-
-  // Título desde <title>
-  const titleMatch = html.match(/<title>Ver\s+([^(|]+?)(?:\s+\(|\s+\|)/i);
-  const title = titleMatch
-    ? titleMatch[1].trim()
-    : slug.replace(/-/g, " ");
-
-  // Descripción: primer <p> largo con texto
-  const descMatch = html.match(/<p[^>]*>([^<]{60,})<\/p>/);
-  const description = descMatch ? innerText(descMatch[1]) : undefined;
-
-  return {
-    id: buildId(type, slug),
-    ref: encodeRef({ type, slug }),
-    title,
-    kind: type === "pelicula" ? "movie" : "series",
-    year: extractYear(html),
-    description,
-    poster: extractPoster(html),
-    backdrop: extractBackdrop(html),
-    genres: extractGenres(html),
-  };
+/** Mezcla en los items de la rejilla el póster vertical y la nota exacta del buscador. */
+function mergeSuggest(items, extra) {
+  if (!extra.length) return items;
+  const byKey = new Map(extra.map((x) => [`${x.type}/${x.slug}`, x]));
+  for (const item of items) {
+    const data = decodeRef(item.ref);
+    const hit = data && byKey.get(`${data.type}/${data.slug}`);
+    if (!hit) continue;
+    if (hit.poster) { item.poster = hit.poster; item.backdrop = hit.poster; }
+    if (typeof hit.rating === "number") item.rating = hit.rating;
+    if (hit.year) item.year = hit.year;
+    if (hit.title && (!item.title || item.title === data.slug.replace(/-/g, " "))) item.title = hit.title;
+  }
+  return items;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -175,163 +245,240 @@ async function fetchDetail(type, slug) {
 
 export async function search(query) {
   await null; // evita rejection trap en Kino ≤ 0.9.49
-  const url = `${BASE}/search?q=${encodeURIComponent(query.q)}`;
-  const r = await kino.fetch(url);
-  if (!r.ok) throw kino.error("unavailable", `search HTTP ${r.status}`);
-  const html = await r.text();
+  const q = String((query && query.q) || "").trim();
+  if (!q) return [];
+  const original = String((query && query.originalTitle) || "").trim();
+  const wantOriginal = original && original.toLowerCase() !== q.toLowerCase();
 
-  const links = extractTitleLinks(html);
+  // 1) la página de resultados, que trae todos los títulos
+  let html = await getText(`${BASE}/search?q=${encodeURIComponent(q)}`);
+  let items = html ? parseCards(html, 100) : [];
+  let fromHtml = items.length > 0;
 
-  // Extraer títulos del HTML de la página de resultados.
-  // El bloque de resultados tiene: título, rating, año, duración/temporadas.
-  // Usamos kino.html.select si está disponible (app), sino regex.
-  const items = [];
-
-  if (typeof kino.html !== "undefined" && kino.html.select) {
-    // En la app: usar kino.html.select para obtener texto preciso por elemento
-    const els = kino.html.select(html, 'a[href*="/pelicula/"], a[href*="/serie/"]');
-    const seen = new Set();
-
-    for (const el of els) {
-      const parsed = parseHref(el.href || "");
-      if (!parsed) continue;
-      const { type, slug } = parsed;
-      if (slug.includes("/")) continue; // saltar sub-rutas
-
-      const id = buildId(type, slug);
-      if (seen.has(id)) continue;
-      seen.add(id);
-
-      // textContent incluye título + rating + año
-      const raw = (el.textContent || "").trim().replace(/\s+/g, " ");
-      // El título está antes del % de rating
-      const titlePart = raw.split(/\d+%/)[0].replace(/^Serie\s*/i, "").trim();
-      const title = titlePart || slug.replace(/-/g, " ");
-
-      // Año: buscar 4 dígitos en el texto
-      const yearM = raw.match(/\b(19|20)\d{2}\b/);
-      const year = yearM ? parseInt(yearM[0], 10) : yearFromSlug(slug);
-
-      items.push({
-        id,
-        ref: encodeRef({ type, slug }),
-        title,
-        kind: type === "pelicula" ? "movie" : "series",
-        year,
-      });
-
-      if (items.length >= 40) break;
-    }
-  } else {
-    // Fallback (kit de Node): usar solo los links extraídos con regex
-    const seen = new Set();
-    for (const { type, slug } of links) {
-      const id = buildId(type, slug);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      items.push(buildItem(type, slug, null));
-      if (items.length >= 40) break;
-    }
+  // 2) si no hay nada, se prueba con el título original (TMDB) que Kino manda en el query
+  if (!items.length && wantOriginal) {
+    html = await getText(`${BASE}/search?q=${encodeURIComponent(original)}`);
+    items = html ? parseCards(html, 100) : [];
+    fromHtml = items.length > 0;
   }
 
-  return items;
+  // 3) si aun así no hay nada, el JSON del buscador del sitio (resultado degradado, se avisa)
+  if (!items.length) {
+    items = (await suggestHits(q)).map(suggestItem);
+    if (!items.length && wantOriginal) items = (await suggestHits(original)).map(suggestItem);
+    if (items.length) kino.log.report("search_fallback: la página de búsqueda no dio títulos, se usó el buscador del sitio");
+  } else if (fromHtml) {
+    mergeSuggest(items, await suggestHits(q));
+  }
+
+  if (!items.length) return [];
+
+  // El orden de Kino: lo que más se parece a lo pedido primero, con todos los títulos que sabe.
+  const titles = [q];
+  if (original) titles.push(original);
+  for (const t of (query && Array.isArray(query.altTitles) ? query.altTitles : [])) {
+    if (typeof t === "string" && t.trim()) titles.push(t.trim());
+  }
+  const sorted = kino.rank.sortBySimilarity(items, titles);
+  // filterRelevant deja fuera lo que no se parece: si se llevara todo, se conserva el orden anterior
+  // (mejor una lista con casi-coincidencias que no encontrar un título que sí está).
+  const relevant = kino.rank.filterRelevant(sorted, titles);
+  items = relevant.length ? relevant : sorted;
+
+  // `type` es una pista, nunca un filtro: lo pedido queda delante, el resto después.
+  const wanted = query && query.type === "movie" ? "movie" : query && query.type === "series" ? "series" : null;
+  if (wanted) items = [...items.filter((i) => i.kind === wanted), ...items.filter((i) => i.kind !== wanted)];
+
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+    if (out.length >= 100) break;
+  }
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────────
 // HOME
 // ──────────────────────────────────────────────────────────────
 
+// Las filas de la portada que tienen una lista real detrás (Ver más → browse).
+const ROW_REFS = {
+  "peliculas-nuevas": { list: "peliculas-release" },
+  "series-nuevas": { list: "series-release" },
+  "mejor-valoradas": { list: "rating" },
+  drama: { genero: "drama" },
+  comedia: { genero: "comedia" },
+  suspense: { genero: "suspense" },
+};
+const ROW_GENRES = { "peliculas-nuevas": "peliculas", "series-nuevas": "series" };
+
+/** Las filas de la portada, leídas del HTML de la home. */
+function homeRows(html) {
+  const rows = [];
+  const ids = new Set();
+  const sections = String(html || "").split('<section class="row">').slice(1);
+  for (const piece of sections) {
+    const section = piece.split("</section>")[0];
+    const titleM = /<h2 class="row-t">([\s\S]*?)<\/h2>/.exec(section);
+    const title = titleM ? textOf(titleM[1]) : "";
+    if (!title) continue;
+    const items = parseCards(section, 60);
+    if (!items.length) continue;
+
+    let id = slugify(title);
+    for (let n = 2; ids.has(id); n++) id = `${slugify(title)}-${n}`;
+    ids.add(id);
+
+    const row = { id, title, items };
+    const ref = ROW_REFS[id];
+    if (ref) row.ref = encodeRef(ref);
+    if (ROW_GENRES[id]) row.genre = ROW_GENRES[id];
+    rows.push(row);
+    if (rows.length >= 20) break;
+  }
+  return rows;
+}
+
 export async function home() {
   await null;
-  const [htmlMain, htmlTrending, htmlSeries] = await Promise.all([
-    kino.fetch(`${BASE}/`).then(r => r.ok ? r.text() : ""),
-    kino.fetch(`${BASE}/peliculas?sort=trending`).then(r => r.ok ? r.text() : ""),
-    kino.fetch(`${BASE}/series?sort=release`).then(r => r.ok ? r.text() : ""),
-  ]);
+  const html = await getText(`${BASE}/`);
+  if (!html) throw kino.error("unavailable", "portada no disponible", { userMessage: "No se pudo cargar la portada. Inténtalo de nuevo." });
 
-  const rows = [];
-
-  // Fila 1: Estrenos recientes (de la portada)
-  const homeLinks = extractTitleLinks(htmlMain).slice(0, 20);
-  if (homeLinks.length) {
-    rows.push({
-      title: "Recién añadidos",
-      ref: encodeRef({ list: "home" }),
-      genre: "peliculas",
-      items: homeLinks.map(({ type, slug }) => buildItem(type, slug, null)),
-    });
-  }
-
-  // Fila 2: Películas en tendencia
-  const trendLinks = extractTitleLinks(htmlTrending)
-    .filter(l => l.type === "pelicula")
-    .slice(0, 20);
-  if (trendLinks.length) {
-    rows.push({
-      title: "Películas en tendencia",
-      ref: encodeRef({ list: "trending" }),
-      genre: "peliculas",
-      items: trendLinks.map(({ type, slug }) => buildItem(type, slug, null)),
-    });
-  }
-
-  // Fila 3: Series recientes
-  const seriesLinks = extractTitleLinks(htmlSeries)
-    .filter(l => l.type === "serie")
-    .slice(0, 20);
-  if (seriesLinks.length) {
-    rows.push({
-      title: "Series recientes",
-      ref: encodeRef({ list: "series-release" }),
-      genre: "series",
-      items: seriesLinks.map(({ type, slug }) => buildItem(type, slug, null)),
-    });
-  }
-
+  const rows = homeRows(html);
+  if (!rows.length) throw kino.error("unavailable", "portada sin filas", { userMessage: "No se pudo cargar la portada. Inténtalo de nuevo." });
   return rows;
+}
+
+// ──────────────────────────────────────────────────────────────
+// SECTION – la sección propia de Kino (pestañas)
+// ──────────────────────────────────────────────────────────────
+
+const TABS = [
+  { id: "inicio", label: "Inicio" },
+  { id: "peliculas", label: "Películas" },
+  { id: "series", label: "Series" },
+];
+
+// Las filas de las pestañas de lista: cada una es una página real del sitio (Ver más → browse).
+const TAB_ROWS = {
+  peliculas: [
+    { id: "tendencia", title: "En tendencia", ref: { list: "trending" } },
+    { id: "estrenos", title: "Estrenos", ref: { list: "peliculas-release" } },
+    { id: "valoradas", title: "Mejor valoradas", ref: { list: "rating" } },
+  ],
+  series: [
+    { id: "estrenos", title: "Estrenos", ref: { list: "series-release" } },
+    { id: "populares", title: "Populares", ref: { list: "series" } },
+    { id: "valoradas", title: "Mejor valoradas", ref: { list: "rating" } },
+  ],
+};
+
+export async function section({ tab } = {}) {
+  await null;
+  const modo = String(kino.config.get("pestanas") || "ambas");
+  const ids = ["inicio", ...(modo === "peliculas" ? ["peliculas"] : modo === "series" ? ["series"] : ["peliculas", "series"])];
+  const tabs = ids.map((id) => ({ id, label: (TABS.find((t) => t.id === id) || {}).label || id }));
+  const chosen = ids.indexOf(tab) >= 0 ? tab : ids[0];
+
+  if (chosen === "inicio") {
+    const html = await getText(`${BASE}/`);
+    if (!html) throw kino.error("unavailable", "portada no disponible", { userMessage: "No se pudo cargar esta sección. Inténtalo de nuevo." });
+    const rows = homeRows(html);
+    if (!rows.length) throw kino.error("unavailable", "portada sin filas", { userMessage: "No se pudo cargar esta sección. Inténtalo de nuevo." });
+    const first = rows[0].items[0];
+    return {
+      tabs,
+      tab: chosen,
+      hero: { title: first.title, text: "Lo más visto hoy en CineHax+", image: first.poster || first.backdrop },
+      rows,
+    };
+  }
+
+  const defs = TAB_ROWS[chosen] || [];
+  const pages = await Promise.all(defs.map((d) => getText(listUrl(d.ref, 1))));
+  const rows = [];
+  defs.forEach((d, i) => {
+    const items = pages[i] ? parseCards(pages[i], 24) : [];
+    if (!items.length) return;
+    rows.push({ id: `${chosen}-${d.id}`, title: d.title, ref: encodeRef(d.ref), items });
+  });
+  if (!rows.length) throw kino.error("unavailable", "sección sin filas", { userMessage: "No se pudo cargar esta sección. Inténtalo de nuevo." });
+  return { tabs, tab: chosen, hero: null, rows };
+}
+
+// ──────────────────────────────────────────────────────────────
+// CATEGORIES – los tiles de la página Categorías de Kino
+// ──────────────────────────────────────────────────────────────
+
+const GENRES = [
+  ["accion", "Acción"], ["comedia", "Comedia"], ["drama", "Drama"], ["suspense", "Suspense"],
+  ["terror", "Terror"], ["animacion", "Animación"], ["crimen", "Crimen"], ["romance", "Romance"],
+  ["aventura", "Aventura"], ["misterio", "Misterio"], ["ciencia-ficcion", "Ciencia ficción"],
+  ["fantasia", "Fantasía"], ["documental", "Documental"], ["familia", "Familia"], ["historia", "Historia"],
+  ["musica", "Música"], ["western", "Western"], ["belica", "Bélica"],
+];
+
+export async function categories() {
+  await null;
+  const modo = String(kino.config.get("pestanas") || "ambas");
+  const out = [];
+  if (modo !== "series") {
+    out.push({ id: "lista-trending", title: "Películas en tendencia", ref: encodeRef({ list: "trending" }) });
+    out.push({ id: "lista-estrenos", title: "Películas nuevas", ref: encodeRef({ list: "peliculas-release" }) });
+  }
+  if (modo !== "peliculas") {
+    out.push({ id: "lista-series-estrenos", title: "Series nuevas", ref: encodeRef({ list: "series-release" }) });
+    out.push({ id: "lista-series", title: "Todas las series", ref: encodeRef({ list: "series" }) });
+  }
+  for (const g of GENRES) out.push({ id: `genero-${g[0]}`, title: g[1], ref: encodeRef({ genero: g[0] }) });
+  return out.slice(0, 24);
 }
 
 // ──────────────────────────────────────────────────────────────
 // BROWSE – paginación de listas
 // ──────────────────────────────────────────────────────────────
 
+/** La URL de una lista: el sitio pagina en /page/N, nunca en ?page=N (ese parámetro se ignora). */
+function listUrl(data, page) {
+  const path = (base, query) => (page > 1 ? `${base}/page/${page}${query || ""}` : `${base}${query || ""}`);
+  if (data.genero) return path(`${BASE}/genero/${encodeURIComponent(data.genero)}`);
+  switch (data.list) {
+    case "home": return page > 1 ? `${BASE}/page/${page}` : `${BASE}/`;
+    case "trending": return path(`${BASE}/peliculas`, "?sort=trending");
+    case "popular": return path(`${BASE}/peliculas`, "?sort=popular");
+    case "rating": return path(`${BASE}/peliculas`, "?sort=rating");
+    case "peliculas-release": return path(`${BASE}/peliculas`, "?sort=release");
+    case "peliculas": return path(`${BASE}/peliculas`);
+    case "series-release": return path(`${BASE}/series`, "?sort=release");
+    case "series": return path(`${BASE}/series`);
+    default: return null;
+  }
+}
+
 export async function browse(ref, cursor) {
   await null;
   const data = decodeRef(ref);
   if (!data) throw kino.error("not_found", "ref inválido");
 
-  const page = parseInt(cursor || "1", 10);
+  const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
+  const url = listUrl(data, page);
+  if (!url) throw kino.error("not_found", "ref de lista desconocido", { userMessage: "Esta sección ya no existe." });
 
-  let url;
-  if (data.list === "home") {
-    url = `${BASE}/page/${page}`;
-  } else if (data.list === "trending") {
-    url = `${BASE}/peliculas?sort=trending&page=${page}`;
-  } else if (data.list === "series-release") {
-    url = `${BASE}/series?sort=release&page=${page}`;
-  } else if (data.list === "peliculas") {
-    url = `${BASE}/peliculas/page/${page}`;
-  } else if (data.list === "series") {
-    url = `${BASE}/series/page/${page}`;
-  } else if (data.genero) {
-    url = `${BASE}/genero/${data.genero}/page/${page}`;
-  } else {
-    throw kino.error("not_found", `browse ref desconocido: ${ref}`);
+  const html = await getText(url);
+  if (!html) {
+    if (page > 1) return { items: [] }; // la lista se acabó: se responde vacía, sin "Ver más"
+    throw kino.error("unavailable", `lista no disponible, página ${page}`, { userMessage: "No se pudo cargar esta sección. Inténtalo de nuevo." });
   }
 
-  const r = await kino.fetch(url);
-  if (!r.ok) throw kino.error("unavailable", `browse HTTP ${r.status}`);
-  const html = await r.text();
-
-  const links = extractTitleLinks(html).slice(0, 30);
-  const items = links.map(({ type, slug }) => buildItem(type, slug, null));
-
-  // ¿hay página siguiente? Si hay items, hay más.
-  const hasNext = items.length >= 20;
+  const items = parseCards(html, 100);
+  if (!items.length && page === 1) throw kino.error("not_found", "lista vacía", { userMessage: "Esta sección no tiene títulos ahora." });
 
   return {
     items,
-    next: hasNext ? String(page + 1) : undefined,
+    next: /<link rel="next"/.test(html) ? String(page + 1) : undefined,
   };
 }
 
@@ -339,169 +486,227 @@ export async function browse(ref, cursor) {
 // EPISODES – temporadas y episodios de una serie
 // ──────────────────────────────────────────────────────────────
 
+/** Las temporadas de la página de la serie: JSON-LD `containsSeason`, y si no, los enlaces. */
+function seasonNumbers(html) {
+  const found = new Set();
+  const series = ldOf(html, ["TVSeries"]);
+  for (const s of series && Array.isArray(series.containsSeason) ? series.containsSeason : []) {
+    const n = s && Number(s.seasonNumber);
+    if (Number.isInteger(n) && n >= 1 && n <= 999) found.add(n);
+  }
+  const re = /\/serie\/[^"'?]+\/temporada\/(\d+)/g;
+  let m;
+  while ((m = re.exec(String(html || ""))) !== null) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 999) found.add(n);
+  }
+  return [...found].sort((a, b) => a - b).slice(0, 50);
+}
+
+/** "30/09/2008" → "2008-09-30"; lo que no sea esa forma se deja caer. */
+function isoDate(value) {
+  const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(String(value || ""));
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : undefined;
+}
+
+/** Los episodios de la página de una temporada, desde el marcado real de cada tarjeta. */
+function parseEpisodes(html, slug) {
+  const out = [];
+  const re = /<a class="ep" href="([^"]+)">([\s\S]*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(String(html || ""))) !== null) {
+    const where = /\/temporada\/(\d+)\/episodio\/(\d+)/.exec(m[1]);
+    if (!where) continue;
+    const season = parseInt(where[1], 10);
+    const number = parseInt(where[2], 10);
+    if (!(season >= 1 && number >= 1)) continue;
+    const block = m[2];
+
+    const titleM = /<span class="ep-t">([\s\S]*?)<\/span>/.exec(block);
+    const dateM = /<span class="ep-s">([\s\S]*?)<\/span>/.exec(block);
+    const overviewM = /<span class="ep-o">([\s\S]*?)<\/span>/.exec(block);
+    const durationM = /<span class="ep-d">(\d+)\s*min/.exec(block);
+    const stillM = /<img src="(https:\/\/image\.tmdb\.org\/[^"]+)"/.exec(block);
+
+    const episode = {
+      season,
+      number,
+      ref: encodeRef({ type: "episodio", slug, season, episode: number }),
+      title: (titleM ? textOf(titleM[1]).replace(/^\d+\.\s*/, "") : "") || `Capítulo ${number}`,
+    };
+    const overview = overviewM ? textOf(overviewM[1]) : "";
+    if (overview) episode.overview = overview;
+    const airDate = isoDate(dateM && dateM[1]);
+    if (airDate) episode.airDate = airDate;
+    if (durationM) episode.runtimeMinutes = parseInt(durationM[1], 10);
+    if (stillM) episode.still = stillM[1].replace(/\/t\/p\/[a-z0-9]+\//, "/t/p/w500/");
+    out.push(episode);
+  }
+
+  // Respaldo: el JSON-LD de la temporada, si el marcado cambia algún día.
+  if (!out.length) {
+    const season = ldOf(html, ["TVSeason"]);
+    for (const e of season && Array.isArray(season.episode) ? season.episode : []) {
+      const number = e && Number(e.episodeNumber);
+      if (!Number.isInteger(number) || number < 1) continue;
+      const s = Number(season.seasonNumber) || 1;
+      const episode = {
+        season: s,
+        number,
+        ref: encodeRef({ type: "episodio", slug, season: s, episode: number }),
+        title: (typeof e.name === "string" && e.name) || `Capítulo ${number}`,
+      };
+      if (typeof e.datePublished === "string" && /^\d{4}-\d{2}-\d{2}$/.test(e.datePublished)) episode.airDate = e.datePublished;
+      out.push(episode);
+    }
+  }
+  return out;
+}
+
+/** Lo que Kino muestra junto a los episodios: del JSON-LD de la serie. */
+function seriesInfo(html, slug) {
+  const series = ldOf(html, ["TVSeries"]);
+  const images = series && series.image ? (Array.isArray(series.image) ? series.image : [series.image]) : [];
+  const info = { title: (series && series.name) || slug.replace(/-/g, " ") };
+  if (images[0]) info.poster = images[0];
+  if (images[1]) info.backdrop = images[1];
+  if (series && typeof series.description === "string" && series.description) info.overview = series.description;
+  if (series && Array.isArray(series.genre) && series.genre.length) info.genres = series.genre.slice(0, 5);
+  const year = (series && typeof series.startDate === "string" && series.startDate.slice(0, 4)) || yearFromSlug(slug);
+  if (year) info.year = year;
+  return info;
+}
+
 export async function episodes(ref) {
   await null;
   const data = decodeRef(ref);
   if (!data || data.type !== "serie") throw kino.error("not_found", "ref no es una serie");
-
   const { slug } = data;
+  if (!slug) throw kino.error("not_found", "ref sin slug");
 
-  // Fetch de la página principal de la serie para obtener temporadas disponibles
-  const r = await kino.fetch(`${BASE}/serie/${slug}`);
-  if (!r.ok) throw kino.error("unavailable", `HTTP ${r.status}`);
-  const html = await r.text();
+  // Reabrir una serie cuesta tantas peticiones como temporadas tenga: se guarda la respuesta entera.
+  const cached = cacheGet(`serie:${slug}`);
+  if (cached && Array.isArray(cached.episodes) && cached.episodes.length) return cached;
 
-  // Extraer números de temporada de links /temporada/N
-  const seasonNums = new Set();
-  const reTemporada = /\/serie\/[^"]+\/temporada\/(\d+)(?:\/episodio\/|")/g;
-  let m;
-  while ((m = reTemporada.exec(html)) !== null) {
-    const n = parseInt(m[1], 10);
-    if (n > 0) seasonNums.add(n);
-  }
+  const serieHtml = await getText(`${BASE}/serie/${slug}`);
+  if (!serieHtml) throw kino.error("unavailable", "serie no disponible", { userMessage: "Esta serie no está disponible ahora." });
 
-  const seasons = [...seasonNums].sort((a, b) => a - b);
-  if (!seasons.length) throw kino.error("not_found", "no se encontraron temporadas");
+  let seasons = seasonNumbers(serieHtml);
+  if (!seasons.length) throw kino.error("not_found", "sin temporadas", { userMessage: "Esta serie no tiene episodios disponibles." });
 
-  // Fetch paralelo de todas las temporadas (máx 6 simultáneos, límite Kino)
-  const BATCH = 6;
-  const allEpisodes = [];
-  const allSeasons = [];
-
-  for (let i = 0; i < seasons.length; i += BATCH) {
-    const chunk = seasons.slice(i, i + BATCH);
-    const pages = await Promise.all(
-      chunk.map(n =>
-        kino.fetch(`${BASE}/serie/${slug}/temporada/${n}`)
-          .then(r => r.ok ? r.text() : "")
-      )
-    );
-
+  const all = [];
+  let missing = 0;
+  for (let i = 0; i < seasons.length; i += 6) { // 6 peticiones a la vez, el máximo de Kino
+    const chunk = seasons.slice(i, i + 6);
+    const pages = await Promise.all(chunk.map((n) => getText(`${BASE}/serie/${slug}/temporada/${n}`)));
     for (let j = 0; j < chunk.length; j++) {
-      const seasonNum = chunk[j];
-      const seasonHtml = pages[j];
-      if (!seasonHtml) continue;
-
-      // Parsear episodios de esta temporada
-      // HTML de episodio: <li>43 min 1. Título30/11/2014 Descripción</li>
-      // Links: /serie/{slug}/temporada/{n}/episodio/{e}
-      const epLinks = [];
-      const reEp = /href="[^"]*\/temporada\/(\d+)\/episodio\/(\d+)"/g;
-      let em;
-      while ((em = reEp.exec(seasonHtml)) !== null) {
-        const s = parseInt(em[1], 10);
-        const e = parseInt(em[2], 10);
-        if (s === seasonNum && !epLinks.find(x => x.episode === e)) {
-          epLinks.push({ season: s, episode: e });
-        }
-      }
-
-      if (!epLinks.length) continue;
-
-      allSeasons.push({ number: seasonNum, title: `Temporada ${seasonNum}` });
-
-      // Parsear títulos de episodios del HTML (dentro de <li>)
-      // Formato: "43 min N. Título DD/MM/YYYY Descripción"
-      const liRe = /<li>([^<]*)<\/li>/gs;
-      const liContents = [];
-      let li;
-      while ((li = liRe.exec(seasonHtml)) !== null) {
-        const text = innerText(li[1]).trim();
-        if (text.match(/^\d+ min \d+\./)) liContents.push(text);
-      }
-
-      for (const ep of epLinks) {
-        // Buscar el li correspondiente al episodio
-        const epText = liContents.find(t => {
-          const numMatch = t.match(/^(?:\d+ min )(\d+)\./);
-          return numMatch && parseInt(numMatch[1], 10) === ep.episode;
-        });
-
-        let title = `Capítulo ${ep.episode}`;
-        let description;
-        let durationMs;
-
-        if (epText) {
-          // "43 min 1. Título30/11/2014 Descripción"
-          const durMatch = epText.match(/^(\d+) min/);
-          if (durMatch) durationMs = parseInt(durMatch[1], 10) * 60 * 1000;
-
-          const rest = epText.replace(/^\d+ min \d+\.\s*/, "");
-          // El título está antes de la fecha DD/MM/YYYY
-          const titleDateMatch = rest.match(/^(.+?)\s*\d{2}\/\d{2}\/\d{4}\s*(.*)/s);
-          if (titleDateMatch) {
-            title = titleDateMatch[1].trim() || title;
-            description = titleDateMatch[2].trim() || undefined;
-          } else {
-            title = rest.trim() || title;
-          }
-        }
-
-        allEpisodes.push({
-          id: `${buildId("serie", slug)}.s${ep.season}e${ep.episode}`,
-          ref: encodeRef({ type: "episodio", slug, season: ep.season, episode: ep.episode }),
-          title,
-          description,
-          season: ep.season,
-          number: ep.episode,
-          durationMs,
-        });
-      }
+      if (!pages[j]) { missing++; continue; }
+      all.push(...parseEpisodes(pages[j], slug));
     }
+    if (all.length >= 5000) break;
   }
+  // Una temporada que no contesta se deja fuera: el resultado sirve, pero no está completo.
+  if (missing) kino.log.report(`temporadas: ${missing} sin página`);
 
-  if (!allEpisodes.length) throw kino.error("not_found", "no se encontraron episodios");
+  if (!all.length) throw kino.error("not_found", "sin episodios", { userMessage: "Esta serie no tiene episodios disponibles." });
 
-  return {
-    episodes: allEpisodes,
-    seasons: allSeasons,
-  };
+  const out = { series: seriesInfo(serieHtml, slug), episodes: all.slice(0, 5000) };
+  cacheSet(`serie:${slug}`, out);
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────────
-// RESOLVE – obtener stream de video con el browser oculto
+// RESOLVE – stream con el browser oculto
 // ──────────────────────────────────────────────────────────────
 
 export async function resolve(ref) {
   await null;
   const data = decodeRef(ref);
-  if (!data) throw kino.error("not_found", "ref inválido");
+  if (!data || typeof data.slug !== "string" || !data.slug) throw kino.error("not_found", "ref inválido");
 
+  const slug = data.slug;
   let watchUrl;
 
   if (data.type === "pelicula") {
-    watchUrl = `${BASE}/pelicula/${data.slug}#watch`;
+    watchUrl = `${BASE}/pelicula/${slug}#watch`;
   } else if (data.type === "episodio") {
-    watchUrl = `${BASE}/serie/${data.slug}/temporada/${data.season}/episodio/${data.episode}#watch`;
+    if (!(data.season >= 1 && data.episode >= 1)) throw kino.error("not_found", "ref de episodio inválido");
+    watchUrl = `${BASE}/serie/${slug}/temporada/${data.season}/episodio/${data.episode}#watch`;
   } else if (data.type === "serie") {
-    // Si se llama resolve sobre una serie directamente (sin episodios),
-    // redirigir al primer episodio de la primera temporada
-    const r = await kino.fetch(`${BASE}/serie/${data.slug}/temporada/1`);
-    if (!r.ok) throw kino.error("not_found", "temporada 1 no encontrada");
-    const html = await r.text();
-    const m = html.match(/\/temporada\/1\/episodio\/(\d+)/);
+    // Sin episodio elegido: se abre el primero de la primera temporada.
+    const html = await getText(`${BASE}/serie/${slug}/temporada/1`);
+    const m = html && /\/temporada\/1\/episodio\/(\d+)/.exec(html);
     const ep = m ? parseInt(m[1], 10) : 1;
-    watchUrl = `${BASE}/serie/${data.slug}/temporada/1/episodio/${ep}#watch`;
+    watchUrl = `${BASE}/serie/${slug}/temporada/1/episodio/${ep}#watch`;
   } else {
     throw kino.error("not_found", "tipo de ref desconocido");
   }
 
-  // Usar el browser oculto para capturar el stream de video
-  const captured = await kino.browser.capture(watchUrl, {
-    timeoutMs: 20000,
-    autoplay: true,
-  });
+  // Browser oculto: la página monta el player y Kino captura el vídeo que pide.
+  const captured = await kino.browser.capture(watchUrl, { timeoutMs: 20000, autoplay: true });
 
   if (!captured.media || !captured.media.length) {
-    throw kino.error("not_found", "no se encontró video en la página");
+    throw kino.error("not_found", "no se encontró video en la página", { userMessage: "No se encontró el video de este título." });
   }
 
+  // La primera entrada es siempre el manifiesto (HLS/DASH), que es lo que se quiere reproducir.
   const best = captured.media[0];
+  const subtitles = (Array.isArray(captured.subtitles) ? captured.subtitles : [])
+    .filter((s) => s && typeof s.url === "string" && s.url)
+    .slice(0, 30)
+    .map((s) => ({ url: s.url, lang: (typeof s.lang === "string" && s.lang) || "und" }));
 
-  // Devolver el stream con streamHosts: any (el CDN es desconocido)
   return {
     url: best.url,
     headers: best.headers || {},
     mime: best.mime || undefined,
+    ...(subtitles.length ? { subtitles } : {}),
   };
+}
+
+// ──────────────────────────────────────────────────────────────
+// SETTINGS – la pestaña Ajustes del plugin
+// ──────────────────────────────────────────────────────────────
+
+export async function settingsStatus() {
+  await null;
+  const chequeo = kino.storage.get("chequeo");
+  return {
+    estado: chequeo === "ok"
+      ? "cinehaxplus.com respondió en la última comprobación"
+      : chequeo === "fallo"
+        ? "El sitio no respondió en la última comprobación"
+        : "Sin comprobación todavía",
+  };
+}
+
+export async function action(key) {
+  await null;
+  if (key === "comprobar") {
+    let ok = false;
+    try {
+      const r = await kino.fetch(`${BASE}/`);
+      ok = r.ok;
+    } catch { ok = false; }
+    try { kino.storage.set("chequeo", ok ? "ok" : "fallo"); } catch { /* sin caché de estado */ }
+    return {
+      message: ok ? "cinehaxplus.com responde correctamente" : "El sitio no responde ahora",
+      refresh: true,
+    };
+  }
+  if (key === "limpiar") {
+    cacheDrop("buscar:");
+    cacheDrop("serie:");
+    return { message: "Caché borrada", refresh: true };
+  }
+  return null;
+}
+
+export async function validateSettings(values) {
+  await null;
+  const v = values && values.pestanas;
+  if (v !== undefined && v !== null && ["ambas", "peliculas", "series"].indexOf(String(v)) < 0) {
+    return { pestanas: "Elige una opción de la lista" };
+  }
+  return null;
 }
