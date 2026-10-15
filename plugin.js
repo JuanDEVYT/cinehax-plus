@@ -1,7 +1,7 @@
 /// <reference path="./kino.d.ts" />
 
 // language: JavaScript ES module · file: plugin.js · target: Kino (QuickJS, apiVersion 6)
-// fuente: cinehaxplus.com – SSR, sin login. Player cargado con JS → browser.capture en resolve.
+// fuente: cinehaxplus.com – SSR, sin login. El vídeo sale de la API del reproductor incrustado (pass del sitio).
 // El sitio sirve enlaces relativos (/pelicula/…) en la portada, en las rejillas y en las busquedas;
 // los absolutos solo aparecen en los <link> de navegacion. Todo lector acepta las dos formas.
 
@@ -80,9 +80,11 @@ function jsonLd(html) {
   return out;
 }
 
-/** El primer JSON-LD de los tipos dados, o null. */
+/** El primer JSON-LD de los tipos dados, o null (también dentro de mainEntity: /generos lo anida en CollectionPage). */
 function ldOf(html, types) {
-  return jsonLd(html).find((x) => x && types && types.includes(x["@type"])) || null;
+  const all = jsonLd(html);
+  const hasType = (x) => x && types && types.includes(x["@type"]);
+  return all.find(hasType) || all.map((x) => x && x.mainEntity).find(hasType) || null;
 }
 
 /** fetch que no lanza: null cuando el sitio no contesta bien. Nunca registra lo que la persona escribió. */
@@ -305,9 +307,13 @@ export async function search(query) {
 // ──────────────────────────────────────────────────────────────
 
 // Las filas de la portada que tienen una lista real detrás (Ver más → browse).
+// El sitio enlaca "Películas nuevas" a /peliculas (recién añadidas), no a ?sort=release (estreno):
+// son listas distintas y la de estreno no es lo último subido al sitio.
 const ROW_REFS = {
-  "peliculas-nuevas": { list: "peliculas-release" },
-  "series-nuevas": { list: "series-release" },
+  "joyas-para-descubrir": { list: "peliculas" },
+  "tendencia-esta-semana": { list: "trending" },
+  "peliculas-nuevas": { list: "peliculas" },
+  "series-nuevas": { list: "series" },
   "mejor-valoradas": { list: "rating" },
   drama: { genero: "drama" },
   comedia: { genero: "comedia" },
@@ -363,16 +369,21 @@ const TABS = [
 ];
 
 // Las filas de las pestañas de lista: cada una es una página real del sitio (Ver más → browse).
+// Las de series usan sus propias listas: "rating" a secas es la de películas.
 const TAB_ROWS = {
   peliculas: [
+    { id: "nuevas", title: "Recién añadidas", ref: { list: "peliculas" } },
     { id: "tendencia", title: "En tendencia", ref: { list: "trending" } },
-    { id: "estrenos", title: "Estrenos", ref: { list: "peliculas-release" } },
+    { id: "populares", title: "Populares", ref: { list: "popular" } },
     { id: "valoradas", title: "Mejor valoradas", ref: { list: "rating" } },
+    { id: "estrenos", title: "Estrenos", ref: { list: "peliculas-release" } },
   ],
   series: [
+    { id: "nuevas", title: "Recién añadidas", ref: { list: "series" } },
+    { id: "tendencia", title: "En tendencia", ref: { list: "series-trending" } },
+    { id: "populares", title: "Populares", ref: { list: "series-popular" } },
+    { id: "valoradas", title: "Mejor valoradas", ref: { list: "series-rating" } },
     { id: "estrenos", title: "Estrenos", ref: { list: "series-release" } },
-    { id: "populares", title: "Populares", ref: { list: "series" } },
-    { id: "valoradas", title: "Mejor valoradas", ref: { list: "rating" } },
   ],
 };
 
@@ -413,27 +424,48 @@ export async function section({ tab } = {}) {
 // CATEGORIES – los tiles de la página Categorías de Kino
 // ──────────────────────────────────────────────────────────────
 
+// Respaldo si /generos no contesta: los 26 géneros del sitio, en su orden (por número de títulos).
 const GENRES = [
-  ["accion", "Acción"], ["comedia", "Comedia"], ["drama", "Drama"], ["suspense", "Suspense"],
+  ["drama", "Drama"], ["comedia", "Comedia"], ["suspense", "Suspense"], ["accion", "Acción"],
   ["terror", "Terror"], ["animacion", "Animación"], ["crimen", "Crimen"], ["romance", "Romance"],
-  ["aventura", "Aventura"], ["misterio", "Misterio"], ["ciencia-ficcion", "Ciencia ficción"],
-  ["fantasia", "Fantasía"], ["documental", "Documental"], ["familia", "Familia"], ["historia", "Historia"],
-  ["musica", "Música"], ["western", "Western"], ["belica", "Bélica"],
+  ["aventura", "Aventura"], ["misterio", "Misterio"], ["familia", "Familia"], ["ciencia-ficcion", "Ciencia ficción"],
+  ["fantasia", "Fantasía"], ["ciencia-ficcion-y-fantasia", "Ciencia ficción y fantasía"],
+  ["accion-y-aventura", "Acción y aventura"], ["documental", "Documental"], ["pelicula-de-tv", "Película de TV"],
+  ["historia", "Historia"], ["musica", "Música"], ["belica", "Bélica"], ["western", "Western"],
+  ["infantil", "Infantil"], ["belica-y-politica", "Bélica y política"], ["reality", "Reality"],
+  ["telenovela", "Telenovela"], ["talk-show", "Talk show"],
 ];
+
+/** Los géneros del sitio, leídos de su página /generos (JSON-LD ItemList, ordenados por tamaño). */
+async function listaGeneros() {
+  const html = await getText(`${BASE}/generos`);
+  const list = ldOf(html, ["ItemList"]);
+  const out = [];
+  for (const x of list && Array.isArray(list.itemListElement) ? list.itemListElement : []) {
+    const m = x && x.url && /\/genero\/([a-z0-9-]+)$/.exec(String(x.url));
+    if (m && x.name) out.push([m[1], String(x.name)]);
+  }
+  return out.length ? out : GENRES;
+}
 
 export async function categories() {
   await null;
   const modo = String(kino.config.get("pestanas") || "ambas");
   const out = [];
   if (modo !== "series") {
+    out.push({ id: "lista-nuevas", title: "Películas recién añadidas", ref: encodeRef({ list: "peliculas" }) });
     out.push({ id: "lista-trending", title: "Películas en tendencia", ref: encodeRef({ list: "trending" }) });
-    out.push({ id: "lista-estrenos", title: "Películas nuevas", ref: encodeRef({ list: "peliculas-release" }) });
+    out.push({ id: "lista-popular", title: "Películas populares", ref: encodeRef({ list: "popular" }) });
+    out.push({ id: "lista-valoradas", title: "Películas mejor valoradas", ref: encodeRef({ list: "rating" }) });
   }
   if (modo !== "peliculas") {
-    out.push({ id: "lista-series-estrenos", title: "Series nuevas", ref: encodeRef({ list: "series-release" }) });
-    out.push({ id: "lista-series", title: "Todas las series", ref: encodeRef({ list: "series" }) });
+    out.push({ id: "lista-series-nuevas", title: "Series recién añadidas", ref: encodeRef({ list: "series" }) });
+    out.push({ id: "lista-series-trending", title: "Series en tendencia", ref: encodeRef({ list: "series-trending" }) });
+    out.push({ id: "lista-series-popular", title: "Series populares", ref: encodeRef({ list: "series-popular" }) });
+    out.push({ id: "lista-series-valoradas", title: "Series mejor valoradas", ref: encodeRef({ list: "series-rating" }) });
   }
-  for (const g of GENRES) out.push({ id: `genero-${g[0]}`, title: g[1], ref: encodeRef({ genero: g[0] }) });
+  // Kino admite 24 tiles: los géneros del sitio (todos los que quepan) van después de las listas.
+  for (const g of await listaGeneros()) out.push({ id: `genero-${g[0]}`, title: g[1], ref: encodeRef({ genero: g[0] }) });
   return out.slice(0, 24);
 }
 
@@ -453,6 +485,9 @@ function listUrl(data, page) {
     case "peliculas-release": return path(`${BASE}/peliculas`, "?sort=release");
     case "peliculas": return path(`${BASE}/peliculas`);
     case "series-release": return path(`${BASE}/series`, "?sort=release");
+    case "series-popular": return path(`${BASE}/series`, "?sort=popular");
+    case "series-rating": return path(`${BASE}/series`, "?sort=rating");
+    case "series-trending": return path(`${BASE}/series`, "?sort=trending");
     case "series": return path(`${BASE}/series`);
     default: return null;
   }
@@ -616,8 +651,117 @@ export async function episodes(ref) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// RESOLVE – stream con el browser oculto
+// RESOLVE – el enlace del vídeo: pass del sitio + API del reproductor incrustado
 // ──────────────────────────────────────────────────────────────
+
+/** El iframe del reproductor que la página de visionado deja en su fachada: dónde incrusta y con qué pass. */
+function embedTag(html) {
+  const m = /data-embed="([^"]+)"/.exec(String(html || ""));
+  if (!m) return null;
+  const tag = decodeEntities(m[1]);
+  const src = (/\ssrc="([^"]+)"/.exec(tag) || [])[1];
+  const pass = (/\sdata-pass="([^"]+)"/.exec(tag) || [])[1];
+  return src && pass ? { src: siteUrl(src), pass: siteUrl(pass) } : null;
+}
+
+/** El host de una URL (el reproductor está en otro dominio que el sitio). */
+function originOf(url) {
+  const m = /^https?:\/\/[^/]+/.exec(String(url || ""));
+  return m ? m[0] : null;
+}
+
+/** Los parámetros que la API del reproductor entiende: tmdb, tipo y, en series, temporada y episodio. */
+function embParams(emb) {
+  let qs = `tmdb=${emb.tmdb}&type=${emb.type}`;
+  if (emb.type === "tv") qs += `&season=${emb.season || 1}&episode=${emb.episode || 1}`;
+  return qs;
+}
+
+/** Reserva si la página del reproductor no trae su PM_EMBED: los números salen de la propia dirección del embed. */
+function embFromSrc(src) {
+  const m = /\/embed\/(movie|tv)\/(\d+)(?:\/(\d+)\/(\d+))?/.exec(String(src || ""));
+  if (!m) return null;
+  const emb = { type: m[1], tmdb: parseInt(m[2], 10) };
+  if (m[1] === "tv") {
+    emb.season = parseInt(m[3] || "1", 10) || 1;
+    emb.episode = parseInt(m[4] || "1", 10) || 1;
+  }
+  const lang = (/[?&]lang=([A-Za-z]{3})/.exec(src) || [])[1];
+  if (lang) emb.lang = lang;
+  return emb;
+}
+
+/** Los servidores en el mismo orden en que el reproductor los arranca: directos antes que proxys, buen idioma primero. */
+function ordenaServidores(lista, lang) {
+  const peso = (s) => (lang && s.lang === lang ? 0 : 1);
+  return lista.slice().sort((a, b) =>
+    peso(a) - peso(b) ||
+    ((a.mode === "proxy") - (b.mode === "proxy")) ||
+    ((a.detras ? 1 : 0) - (b.detras ? 1 : 0)) ||
+    ((a.src || 9) - (b.src || 9)));
+}
+
+/** fetch que no lanza y devuelve JSON ya parseado. */
+async function getJson(url, options) {
+  try {
+    const r = await kino.fetch(url, options);
+    return r.ok ? JSON.parse(await r.text()) : null;
+  } catch { return null; }
+}
+
+// Los enlaces del reproductor van atados al User-Agent que los pidió: el mismo abre el stream
+// y lo reproduce, o el servidor responde 403.
+const UA = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Safari/537.36";
+
+/**
+ * El vídeo no está en la página: la web solo deja una fachada con espera, y el reproductor incrustado
+ * pide el enlace a su propia API con dos credenciales que ella misma sirve (pass del sitio + ui suyo).
+ * Así se salta el anuncio del reproductor y el browser oculto, que a menudo no llega a montar nada.
+ */
+async function flujoPlayer(watchUrl) {
+  const t0 = Date.now();
+  const page = await getText(watchUrl);
+  const embed = embedTag(page);
+  if (!embed) return null;
+
+  // El pass dura 10 minutos y va atado al título: se pide siempre fresco, desde el sitio.
+  const pass = await getJson(embed.pass);
+  if (!pass || !pass.pass) return null;
+
+  const sep = embed.src.includes("?") ? "&" : "?";
+  const embedRes = await kino.fetch(`${embed.src}${sep}pass=${encodeURIComponent(pass.pass)}`, { headers: { "User-Agent": UA } });
+  const embedHtml = embedRes.ok ? await embedRes.text() : null;
+  if (!embedHtml) return null;
+
+  const ui = (embedHtml.match(/PM_UI="([^"]+)"/) || [])[1];
+  let emb = null;
+  try { emb = JSON.parse((embedHtml.match(/PM_EMBED=(\{[^}]+\})/) || [])[1] || "null"); } catch { /* vale la dirección del embed */ }
+  if (!emb) emb = embFromSrc(embed.src);
+  const origin = originOf(embed.src);
+  if (!ui || !emb || !emb.tmdb || !origin) return null;
+
+  const params = embParams(emb);
+  const pide = { headers: { "User-Agent": UA } };
+  const srv = await getJson(`${origin}/servers?${params}&ui=${encodeURIComponent(ui)}`, pide);
+  const lista = srv && Array.isArray(srv.servers) ? srv.servers : [];
+  if (!lista.length) return null;
+
+  const orden = ordenaServidores(lista, emb.lang);
+  for (let i = 0; i < orden.length && i < 6; i += 1) {
+    const s = orden[i];
+    const v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, pide);
+    // type "iframe" es un servidor que solo sabe abrirse en su propia página: Kino no puede reproducirlo.
+    if (!v || !v.url || v.type === "iframe") continue;
+    kino.log(`flujo: ${v.type} vía ${s.name || s.host || "servidor"} en ${Date.now() - t0} ms`);
+    return {
+      url: v.url,
+      // El reproductor de Kino manda estas cabeceras en el manifiest y en cada fragmento.
+      headers: { "User-Agent": UA, Referer: `${origin}/` },
+      mime: v.type === "hls" ? "application/x-mpegURL" : v.type === "dash" ? "application/dash+xml" : v.type === "mp4" ? "video/mp4" : undefined,
+    };
+  }
+  return null;
+}
 
 export async function resolve(ref) {
   await null;
@@ -628,21 +772,26 @@ export async function resolve(ref) {
   let watchUrl;
 
   if (data.type === "pelicula") {
-    watchUrl = `${BASE}/pelicula/${slug}#watch`;
+    watchUrl = `${BASE}/pelicula/${slug}`;
   } else if (data.type === "episodio") {
     if (!(data.season >= 1 && data.episode >= 1)) throw kino.error("not_found", "ref de episodio inválido");
-    watchUrl = `${BASE}/serie/${slug}/temporada/${data.season}/episodio/${data.episode}#watch`;
+    watchUrl = `${BASE}/serie/${slug}/temporada/${data.season}/episodio/${data.episode}`;
   } else if (data.type === "serie") {
     // Sin episodio elegido: se abre el primero de la primera temporada.
     const html = await getText(`${BASE}/serie/${slug}/temporada/1`);
     const m = html && /\/temporada\/1\/episodio\/(\d+)/.exec(html);
     const ep = m ? parseInt(m[1], 10) : 1;
-    watchUrl = `${BASE}/serie/${slug}/temporada/1/episodio/${ep}#watch`;
+    watchUrl = `${BASE}/serie/${slug}/temporada/1/episodio/${ep}`;
   } else {
     throw kino.error("not_found", "tipo de ref desconocido");
   }
 
-  // Browser oculto: la página monta el player y Kino captura el vídeo que pide.
+  // Primero el enlace directo que sirve el reproductor incrustado: rápido y sin anuncios.
+  const stream = await flujoPlayer(watchUrl);
+  if (stream) return stream;
+
+  // Último recurso: el browser oculto de Kino monta la página y captura el vídeo que pide.
+  kino.log.report("resolve_fallback", "sin enlace directo del reproductor, se usa el browser");
   const captured = await kino.browser.capture(watchUrl, { timeoutMs: 20000, autoplay: true });
 
   if (!captured.media || !captured.media.length) {

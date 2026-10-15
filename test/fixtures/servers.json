@@ -1,0 +1,11 @@
+{
+  "meta": { "title": "El Mentalista", "year": 2008 },
+  "pendiente": false,
+  "probados": 4,
+  "servers": [
+    { "id": "s-iframe-1", "k": "s-iframe-1", "site": "fuente-b", "src": 1, "host": "embed-b.example", "name": "Servidor 2", "lang": "LAT", "mode": "direct", "type": "iframe", "detras": false },
+    { "id": "s-direct-1", "k": "s-direct-1", "site": "fuente-a", "src": 2, "host": "cdn-a.example", "name": "Servidor 1", "lang": "LAT", "mode": "direct", "type": "hls", "detras": false },
+    { "id": "s-proxy-1", "k": "s-proxy-1", "site": "fuente-c", "src": 3, "host": "cdn-c.example", "name": "Servidor 3", "lang": "LAT", "mode": "proxy", "type": "hls", "detras": false },
+    { "id": "s-direct-esp", "k": "s-direct-esp", "site": "fuente-a", "src": 4, "host": "cdn-a.example", "name": "Servidor 4", "lang": "ESP", "mode": "direct", "type": "hls", "detras": false }
+  ]
+}

@@ -22,30 +22,52 @@ const PAGES = {
   "/pelicula/madre-siniestra-2026": read("pelicula-madre-siniestra.html"),
   "/serie/el-mentalista": read("serie-el-mentalista.html"),
   "/serie/el-mentalista/temporada/1": read("temporada-1-el-mentalista.html"),
+  "/serie/el-mentalista/temporada/1/episodio/1": read("episodio-el-mentalista.html"),
   "/serie/el-mentalista/temporada/2": read("temporada-2-el-mentalista.html"),
   "/peliculas?sort=release": read("peliculas-release.html"),
   "/peliculas/page/2?sort=release": read("peliculas-release-p2.html"),
   "/peliculas?sort=trending": read("peliculas-release.html"),
   "/peliculas?sort=rating": read("peliculas-release.html"),
+  "/peliculas?sort=popular": read("peliculas-release.html"),
+  "/peliculas": read("peliculas-nuevas.html"),
+  "/peliculas/page/2": read("peliculas-nuevas.html"),
+  "/generos": read("generos.html"),
   "/series": read("series-release.html"),
   "/series?sort=release": read("series-release.html"),
-  "/series?sort=popular": read("series-release.html"),
+  "/series?sort=popular": read("series-popular.html"),
   "/series?sort=rating": read("series-release.html"),
+  "/series?sort=trending": read("series-release.html"),
   "/genero/suspense": read("genero-suspense.html"),
 };
 
 let fetched = [];
 let config = { pestanas: "ambas" };
+let browserCalls = 0;
+let videoUa = null;
 const store = new Map();
 
+const asJson = (body) => ({ ok: true, status: 200, text: async () => (typeof body === "string" ? body : JSON.stringify(body)) });
+
 globalThis.kino = {
-  fetch: async (url) => {
+  fetch: async (url, options) => {
     const path = String(url).replace(/^https?:\/\/[^/]+/, "");
     fetched.push(path);
     if (Object.prototype.hasOwnProperty.call(PAGES, path)) return { ok: true, status: 200, text: async () => PAGES[path] };
     // Cualquier género sirve la misma rejilla: lo que se prueba es la estructura, no el catálogo.
     const genre = /^\/genero\/[a-z-]+$/.exec(path);
     if (genre) return { ok: true, status: 200, text: async () => PAGES["/genero/suspense"] };
+    // El reproductor incrustado: el pass del sitio, su página y su API (otro host, mismo camino).
+    if (path.startsWith("/api/player-pass")) return asJson({ ok: true, pass: "v1.test-pass", ttl: 600 });
+    if (path.startsWith("/embed/movie/1400837")) return asJson(read("embed-movie.html"));
+    if (path.startsWith("/embed/tv/5920")) return asJson(read("embed-tv.html"));
+    if (path.startsWith("/servers?")) return asJson(read("servers.json"));
+    if (path.startsWith("/video?")) {
+      videoUa = options && options.headers && options.headers["User-Agent"];
+      const embed = /embed=([^&]+)/.exec(path);
+      const id = embed ? decodeURIComponent(embed[1]) : "";
+      if (id === "s-iframe-1") return asJson({ type: "iframe", url: "https://embed-b.example/e/xyz" });
+      return asJson({ type: "hls", url: "https://api-encrypted.moviemaster.lat/p/test-hls" });
+    }
     return { ok: false, status: 404, text: async () => "" };
   },
   error: kinoError,
@@ -59,7 +81,7 @@ globalThis.kino = {
     keys: () => [...store.keys()],
   }),
   browser: Object.freeze({
-    capture: async () => { throw kinoError("browser_unavailable", "sin navegador en el kit"); },
+    capture: async () => { browserCalls += 1; throw kinoError("browser_unavailable", "sin navegador en el kit"); },
   }),
 };
 
@@ -104,7 +126,7 @@ test("home: las filas traen sus tarjetas, con id propio y Ver más donde hay lis
   const nuevas = rows.find((r) => r.id === "peliculas-nuevas");
   assert.ok(nuevas, "existe la fila de películas nuevas");
   assert.equal(nuevas.genre, "peliculas");
-  assert.deepEqual(JSON.parse(nuevas.ref), { list: "peliculas-release" });
+  assert.deepEqual(JSON.parse(nuevas.ref), { list: "peliculas" });
 
   const top10 = rows.find((r) => r.id === "top-10-de-hoy");
   assert.equal(top10.items.length, 10);
@@ -168,9 +190,44 @@ test("episodes: ref que no es serie", async () => {
   await assert.rejects(plugin.episodes("no es json"), (e) => e.code === "not_found");
 });
 
-test("resolve: la ref mala es not_found y el navegador se pide a kino.browser", async () => {
+test("resolve: el enlace sale de la API del reproductor, sin browser ni anuncios", async () => {
+  store.clear();
+  fetched.length = 0;
+  browserCalls = 0;
+  const out = await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.equal(out.url, "https://api-encrypted.moviemaster.lat/p/test-hls");
+  assert.equal(out.mime, "application/x-mpegURL");
+  assert.equal(out.headers.Referer, "https://api-encrypted.moviemaster.lat/");
+  // el enlace del reproductor va atado al User-Agent que lo pidió: el stream lo lleva igual
+  assert.ok(out.headers["User-Agent"], "el stream declara User-Agent");
+  assert.equal(videoUa, out.headers["User-Agent"], "el mismo UA pide el vídeo y lo reproduce");
+  assert.equal(browserCalls, 0, "no se abre el browser");
+  // el pass lo sirve el sitio y el embed lo recibe con su credencial
+  assert.ok(fetched.some((p) => p.startsWith("/api/player-pass?t=movie:1400837")), "pide el pass al sitio");
+  assert.ok(fetched.some((p) => p.startsWith("/embed/movie/1400837") && p.includes("pass=v1.test-pass")), "el embed recibe el pass");
+  // el servidor que solo sabe abrirse en su propia página se salta
+  const videos = fetched.filter((p) => p.startsWith("/video?"));
+  assert.equal(videos.length, 2, "salta el iframe y usa el directo");
+  assert.ok(videos[0].includes("embed=s-iframe-1"));
+  assert.ok(videos[1].includes("embed=s-direct-1"));
+});
+
+test("resolve: una ref de serie abre el primer episodio de la temporada 1", async () => {
+  store.clear();
+  fetched.length = 0;
+  browserCalls = 0;
+  const out = await plugin.resolve(JSON.stringify({ type: "serie", slug: "el-mentalista" }));
+  assert.equal(out.url, "https://api-encrypted.moviemaster.lat/p/test-hls");
+  assert.equal(browserCalls, 0);
+  assert.ok(fetched.includes("/serie/el-mentalista/temporada/1/episodio/1"), "abre el episodio 1");
+  assert.ok(fetched.some((p) => p.startsWith("/embed/tv/5920/1/1")), "por el reproductor de series");
+});
+
+test("resolve: la ref mala es not_found y una página sin reproductor cae al browser", async () => {
+  browserCalls = 0;
   await assert.rejects(plugin.resolve("no es json"), (e) => e.code === "not_found");
-  await assert.rejects(plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" })), (e) => e.code === "browser_unavailable");
+  await assert.rejects(plugin.resolve(JSON.stringify({ type: "pelicula", slug: "no-existe-2020" })), (e) => e.code === "browser_unavailable");
+  assert.ok(browserCalls >= 1, "sin enlace directo se intenta kino.browser");
 });
 
 test("search: lo que no se parece al título se queda fuera (filterRelevant)", async () => {
@@ -215,16 +272,18 @@ test("section: la portada con sus pestañas y su destacado", async () => {
 
   const peliculas = await plugin.section({ tab: "peliculas" });
   assert.equal(peliculas.tab, "peliculas");
-  assert.equal(peliculas.rows.length, 3);
+  assert.equal(peliculas.rows.length, 5);
   for (const row of peliculas.rows) {
     assert.equal(row.items.length, 24);
     assert.ok(row.ref.includes("list") || row.ref.includes("genero"));
     assert.ok(ID.test(row.id));
   }
+  assert.deepEqual(JSON.parse(peliculas.rows[0].ref), { list: "peliculas" });
 
   const series = await plugin.section({ tab: "series" });
-  assert.equal(series.rows.length, 3);
+  assert.equal(series.rows.length, 5);
   assert.ok(series.rows.every((r) => r.items.length === 24));
+  assert.ok(series.rows.every((r) => JSON.parse(r.ref).list.startsWith("series")), "las filas de series usan listas de series");
 });
 
 test("section: el ajuste de pestañas quita las que no tocan", async () => {
@@ -243,7 +302,9 @@ test("section: el ajuste de pestañas quita las que no tocan", async () => {
 
 test("categories: tiles con ref válida, y un tile abre browse", async () => {
   const cats = await plugin.categories();
-  assert.equal(cats.length, 22);
+  assert.equal(cats.length, 24);
+  assert.ok(cats.filter((c) => c.id.startsWith("lista-")).length >= 8, "las listas de películas y series van delante");
+  assert.ok(cats.some((c) => c.id === "genero-drama") && cats.some((c) => c.id === "genero-terror"), "los géneros del sitio se leen de /generos");
   assert.equal(new Set(cats.map((c) => c.id)).size, cats.length);
   for (const c of cats) {
     assert.ok(ID.test(c.id) && c.title.length <= 40 && c.ref);
