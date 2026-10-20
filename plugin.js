@@ -124,35 +124,42 @@ function cacheDrop(prefix) {
 }
 
 /**
- * Tarjetas del sitio: <a class="cd"> en rejillas y búsquedas, <a class="t10"> en el Top 10.
- * Devuelve items con título, año, valoración, duración y la imagen que la tarjeta trae
- * (la rejilla usa el backdrop; el Top 10 trae el póster vertical).
+ * Tarjetas del sitio: <a class="pc"> en rejillas y búsquedas, el Top 10 en <ol class="rk">,
+ * y el marcado antiguo .cd/.t10 por si el sitio vuelve atrás.
+ * Devuelve items con título, año, valoración, duración y la imagen que la tarjeta trae.
  */
 function parseCards(html, limit) {
   const max = limit || 100;
   const out = [];
   const seen = new Set();
-  const re = /<a class="(?:cd|t10)" href="([^"]+)">([\s\S]*?)<\/a>/g;
+  const src = String(html || "");
+  const blocks = [];
+  const cardRe = /<a class="(?:pc|cd|t10)" href="([^"]+)">([\s\S]*?)<\/a>/g;
   let m;
-  while ((m = re.exec(String(html || ""))) !== null) {
+  while ((m = cardRe.exec(src)) !== null) blocks.push([m[1], m[2]]);
+  const rk = /<ol class="rk">([\s\S]*?)<\/ol>/.exec(src);
+  if (rk) {
+    const liRe = /<li><a href="([^"]+)">([\s\S]*?)<\/a><\/li>/g;
+    while ((m = liRe.exec(rk[1])) !== null) blocks.push([m[1], m[2]]);
+  }
+
+  for (const [href, block] of blocks) {
     if (out.length >= max) break;
-    const where = parseHref(m[1]);
+    const where = parseHref(href);
     if (!where) continue;
     const { type, slug } = where;
     const id = buildId(type, slug);
     if (seen.has(id)) continue;
     seen.add(id);
-    const block = m[2];
 
-    const titleTag = /<span class="cd-t">([\s\S]*?)<\/span>/.exec(block);
+    const titleTag = /<span class="(?:pc-t|cd-t)">([\s\S]*?)<\/span>/.exec(block);
     const alt = /alt="([^"]*)"/.exec(block);
     const title = textOf(titleTag ? titleTag[1] : alt ? alt[1] : "") || slug.replace(/-/g, " ");
 
-    const meta = /<span class="cd-m">([\s\S]*)$/.exec(block);
-    const metaText = meta ? meta[1] : "";
-    const ratingM = /(\d{1,3})%/.exec(metaText);
-    const yearM = /<span>(\d{4})<\/span>/.exec(metaText);
-    const runtimeM = /<span>(?:(\d+)h\s*(\d+)?m?|(\d+)m)<\/span>/.exec(metaText);
+    const yearM = /<span>(\d{4})<\/span>/.exec(block);
+    const runtimeM = /<span>(?:(\d+)h\s*(\d+)\s*m|(\d+)m)<\/span>/.exec(block);
+    const stkM = /class="stk">([\d.]+)</.exec(block);
+    const pctM = /class="match">(\d{1,3})%/.exec(block) || /(\d{1,3})%/.exec(block);
     const image = (/<img src="(https:\/\/image\.tmdb\.org\/[^"]+)"/.exec(block) || [])[1];
 
     const item = {
@@ -164,7 +171,8 @@ function parseCards(html, limit) {
       poster: image,
       backdrop: image,
     };
-    if (ratingM) item.rating = Number(ratingM[1]) / 10;
+    if (stkM) item.rating = Number(stkM[1]);
+    else if (pctM) item.rating = Number(pctM[1]) / 10;
     if (runtimeM) {
       const minutes = runtimeM[1] ? Number(runtimeM[1]) * 60 + Number(runtimeM[2] || 0) : Number(runtimeM[3] || 0);
       if (minutes > 0) item.runtimeMinutes = minutes;
@@ -321,6 +329,23 @@ const ROW_REFS = {
 };
 const ROW_GENRES = { "peliculas-nuevas": "peliculas", "series-nuevas": "series" };
 
+/** La ref de una fila o pestaña a partir del enlace "Explorar todo" del propio sitio. */
+function refFromMore(href) {
+  const s = String(href || "");
+  const lista = /^\/(peliculas|series)(?:\?sort=([a-z]+))?/.exec(s);
+  if (lista) {
+    if (lista[1] === "peliculas") {
+      if (!lista[2]) return { list: "peliculas" };
+      return { list: lista[2] === "release" ? "peliculas-release" : lista[2] };
+    }
+    if (!lista[2]) return { list: "series" };
+    return { list: `series-${lista[2]}` };
+  }
+  const genero = /^\/genero\/([a-z0-9-]+)/.exec(s);
+  if (genero) return { genero: genero[1] };
+  return null;
+}
+
 /** Las filas de la portada, leídas del HTML de la home. */
 function homeRows(html) {
   const rows = [];
@@ -339,7 +364,9 @@ function homeRows(html) {
     ids.add(id);
 
     const row = { id, title, items };
-    const ref = ROW_REFS[id];
+    // El enlace del sitio manda: es la misma página a la que lleva "Explorar todo".
+    const moreM = /<a class="more" href="([^"]+)"/.exec(section);
+    const ref = moreM ? refFromMore(moreM[1]) : ROW_REFS[id];
     if (ref) row.ref = encodeRef(ref);
     if (ROW_GENRES[id]) row.genre = ROW_GENRES[id];
     rows.push(row);
@@ -709,6 +736,36 @@ async function getJson(url, options) {
   } catch { return null; }
 }
 
+/** True si todas las direcciones de la lista son de anuncios (el CDN de anuncios del sitio). */
+function soloAnuncios(direcciones) {
+  if (!direcciones.length) return false;
+  for (const d of direcciones) if (!/tiktokcdn|ad-site|\/ad\//i.test(d)) return false;
+  return true;
+}
+
+/**
+ * ¿La lista HLS trae vídeo de verdad? Hoy los servidores "directo" devuelven manifiestos cuyos
+ * fragmentos son imágenes de anuncios (tiktokcdn) y los "proxy" traen el vídeo: el reproductor del
+ * sitio lo comprueba al reproducir y salta al siguiente servidor. Aquí se mira antes de devolver
+ * el enlace. Sin respuesta (fuera del kit o red caída) se confía y Kino lo intenta reproducir.
+ */
+async function listaSana(url, opciones) {
+  try {
+    const r = await kino.fetch(url, opciones);
+    if (!r.ok) return true;
+    const txt = await r.text();
+    if (txt.indexOf("#EXTM3U") < 0) return false;
+    const urls = txt.split("\n").filter((l) => l && l.charAt(0) !== "#");
+    if (txt.indexOf("#EXTINF") >= 0) return !soloAnuncios(urls); // ya es la de medios
+    if (!urls[0]) return false;
+    const v = await kino.fetch(new URL(urls[0], url).href, opciones);
+    if (!v.ok) return false;
+    const vt = await v.text();
+    if (vt.indexOf("#EXTM3U") < 0) return false;
+    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#"));
+  } catch { return true; }
+}
+
 // Los enlaces del reproductor van atados al User-Agent que los pidió: el mismo abre el stream
 // y lo reproduce, o el servidor responde 403.
 const UA = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Safari/537.36";
@@ -747,11 +804,16 @@ async function flujoPlayer(watchUrl) {
   if (!lista.length) return null;
 
   const orden = ordenaServidores(lista, emb.lang);
-  for (let i = 0; i < orden.length && i < 6; i += 1) {
+  for (let i = 0; i < orden.length && i < 10; i += 1) {
     const s = orden[i];
     const v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, pide);
     // type "iframe" es un servidor que solo sabe abrirse en su propia página: Kino no puede reproducirlo.
     if (!v || !v.url || v.type === "iframe") continue;
+    // Un manifiesto que solo trae anuncios no sirve: se pasa al siguiente servidor, como hace el sitio.
+    if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, pide))) {
+      kino.log(`flujo: lista sin vídeo en ${s.name || s.id.slice(0, 8)}, se salta`);
+      continue;
+    }
     kino.log(`flujo: ${v.type} vía ${s.name || s.host || "servidor"} en ${Date.now() - t0} ms`);
     return {
       url: v.url,

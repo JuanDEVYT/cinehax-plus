@@ -2,13 +2,693 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pelis Master · reproductor</title>
-</head>
-<body>
-<div class="cfp-player"><video id="cfpVideo" playsinline controls></video></div>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/plyr/3.7.8/plyr.css">
+<style>
+/* ===== Reproductor: mismo tema que el plugin coflix-player (fondo #191a1c, secundario
+   #1f2022, acento #2a2c30, primario #e11d48, texto #e8e8e8, Open Sans). ===== */
+.cfp-player{--cfp-bg:#191a1c;--cfp-bg2:#1f2022;--cfp-accent:#2a2c30;--cfp-accent-h:#35383d;--cfp-primary:#e11d48;--cfp-primary-h:#c8143c;--cfp-text:#e8e8e8;--cfp-muted:#9a9a9a;--cfp-ok:#4caf50;--cfp-err:#e11d48;
+  --plyr-color-main:var(--cfp-primary);--plyr-video-control-color:#fff;--plyr-video-control-color-hover:#fff;--plyr-video-control-background-hover:var(--cfp-primary);--plyr-menu-background:rgba(31,32,34,.97);--plyr-menu-color:var(--cfp-text);--plyr-menu-item-arrow-color:var(--cfp-muted);--plyr-menu-back-border-color:#33363c;--plyr-menu-back-border-shadow-color:#000;--plyr-tooltip-background:rgba(31,32,34,.95);--plyr-tooltip-color:#fff;--plyr-range-fill-background:var(--cfp-primary);--plyr-video-progress-buffered-background:rgba(255,255,255,.25);--plyr-range-thumb-background:#fff;--plyr-font-family:"Open Sans",system-ui,sans-serif;--plyr-control-radius:6px;--plyr-video-controls-background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.75));
+  position:relative;width:100%;background:var(--cfp-bg);color:var(--cfp-text);border-radius:12px;overflow:visible;margin:0 0 1.25em;
+  font-family:"Open Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.35);border:1px solid #26282c}
+.cfp-player *{box-sizing:border-box}
+
+/* cabecera: título + badge a la izquierda, menús de fuentes a la derecha */
+.cfp-player .cfp-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:var(--cfp-bg2);border-bottom:1px solid #26282c;border-radius:12px 12px 0 0;position:relative;z-index:5}
+.cfp-player .cfp-meta{display:flex;align-items:center;gap:10px;min-width:0}
+.cfp-player .cfp-title{font-weight:600;font-size:14px;color:var(--cfp-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cfp-player .cfp-badge{flex:none;font-size:11px;font-weight:600;color:var(--cfp-muted);background:var(--cfp-accent);padding:4px 9px;border-radius:999px;letter-spacing:.2px}
+.cfp-player .cfp-badge.is-direct{color:#b9f0c0;background:rgba(76,175,80,.14)}
+.cfp-player .cfp-badge.is-embed{color:#ffd9a8;background:rgba(245,158,11,.14)}
+.cfp-player .cfp-badge:empty{display:none}
+.cfp-player .cfp-menus{display:flex;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end}
+
+/* menú desplegable (uno por fuente) */
+.cfp-player .cfp-menu{position:relative}
+.cfp-player .cfp-menu-btn{appearance:none;border:1px solid #33363c;background:var(--cfp-accent);color:var(--cfp-text);font:600 13px/1 "Open Sans",system-ui,sans-serif;padding:9px 12px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:background .15s,border-color .15s}
+.cfp-player .cfp-menu-btn:hover,.cfp-player .cfp-menu.is-open .cfp-menu-btn{background:var(--cfp-accent-h);border-color:#454a52}
+.cfp-player .cfp-menu.has-active .cfp-menu-btn{border-color:var(--cfp-primary);box-shadow:inset 0 0 0 1px rgba(225,29,72,.35)}
+.cfp-player .cfp-menu-dot{width:8px;height:8px;border-radius:50%;background:var(--cfp-primary);box-shadow:0 0 0 3px rgba(225,29,72,.22)}
+.cfp-player .cfp-menu-count{font-size:11px;font-weight:700;background:rgba(0,0,0,.35);color:var(--cfp-muted);padding:2px 7px;border-radius:999px;min-width:20px;text-align:center}
+.cfp-player .cfp-menu-caret{width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--cfp-muted);transition:transform .15s}
+.cfp-player .cfp-menu.is-open .cfp-menu-caret{transform:rotate(180deg)}
+.cfp-player .cfp-menu-panel{position:absolute;right:0;top:calc(100% + 6px);min-width:250px;max-height:60vh;overflow:auto;background:var(--cfp-bg2);border:1px solid #33363c;border-radius:10px;box-shadow:0 14px 34px rgba(0,0,0,.55);padding:6px;opacity:0;visibility:hidden;transform:translateY(-6px);transition:opacity .15s,transform .15s,visibility .15s;z-index:50}
+.cfp-player .cfp-menu.is-open .cfp-menu-panel{opacity:1;visibility:visible;transform:translateY(0)}
+.cfp-player .cfp-menu-panel::before{content:"";position:absolute;left:0;right:0;top:-8px;height:8px}
+.cfp-player .cfp-menu-group{font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--cfp-muted);padding:8px 10px 4px;text-transform:uppercase}
+.cfp-player .cfp-item{appearance:none;border:0;background:transparent;width:100%;display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:7px;color:var(--cfp-text);font:13px/1.2 "Open Sans",system-ui,sans-serif;cursor:pointer;text-align:left;transition:background .12s}
+.cfp-player .cfp-item:hover{background:var(--cfp-accent)}
+.cfp-player .cfp-item-dot{width:7px;height:7px;border-radius:50%;background:#3d4149;flex:none}
+.cfp-player .cfp-item.is-active{background:rgba(225,29,72,.14);color:#fff}
+.cfp-player .cfp-item.is-active .cfp-item-dot{background:var(--cfp-primary);box-shadow:0 0 0 3px rgba(225,29,72,.22)}
+.cfp-player .cfp-item-name{flex:1;font-weight:600}
+.cfp-player .cfp-item-kind{font-size:10px;font-weight:700;letter-spacing:.4px;color:#b9f0c0;background:rgba(76,175,80,.14);padding:3px 7px;border-radius:999px}
+.cfp-player .cfp-item.is-proxy .cfp-item-kind{color:#ffd9a8;background:rgba(245,158,11,.14)}
+
+/* pantalla */
+.cfp-player .cfp-screen{position:relative;background:#000;aspect-ratio:16/9;border-radius:0 0 12px 12px;overflow:hidden}
+.cfp-player .cfp-videowrap,.cfp-player .cfp-videowrap .plyr{position:absolute;inset:0;height:100%}
+.cfp-player .cfp-video{width:100%;height:100%;background:#000;outline:none}
+.cfp-player .plyr--video{height:100%;border-radius:0 0 12px 12px}
+.cfp-player .plyr__video-wrapper{height:100%}
+/* skin tipo "shaka": play grande oscuro con triángulo rojo, progreso arriba, botones con etiqueta */
+.cfp-player .plyr--full-ui .plyr__control--overlaid{display:flex}
+.cfp-player .plyr__control--overlaid{width:88px;height:88px;padding:0;margin:0;transform:translate(-50%,-50%);background:rgba(0,0,0,.45);box-shadow:0 0 0 2px rgba(255,255,255,.06),0 10px 30px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;transition:transform .15s,background .15s}
+.cfp-player .plyr__control--overlaid svg{width:34px;height:34px;fill:var(--cfp-primary);filter:drop-shadow(0 2px 6px rgba(225,29,72,.6));position:relative;left:3px;top:0}
+.cfp-player .plyr__control--overlaid:hover{background:rgba(0,0,0,.6);transform:translate(-50%,-50%) scale(1.06)}
+.cfp-player .plyr__controls{flex-wrap:wrap;padding:28px 14px 10px;gap:0 4px;background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.55) 40%,rgba(0,0,0,.85))}
+.cfp-player .cfp-bar{display:flex;align-items:center;gap:10px;width:100%;flex-basis:100%;margin-bottom:8px}
+.cfp-player .cfp-bar .plyr__progress__container{flex:1;margin:0}
+.cfp-player .cfp-bar .plyr__time{font-size:13px;font-weight:600;color:#fff;padding:0;min-width:42px}
+.cfp-player .cfp-bar .plyr__time--duration{text-align:right}
+.cfp-player .cfp-bar .plyr__time + .plyr__time::before{display:none}
+.cfp-player .plyr__progress input[type=range]{height:16px}
+.cfp-player .plyr--full-ui input[type=range]::-webkit-slider-thumb{width:14px;height:14px;background:var(--cfp-primary);box-shadow:0 0 0 3px rgba(225,29,72,.25);border:0}
+.cfp-player .plyr--full-ui input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cfp-primary);box-shadow:0 0 0 3px rgba(225,29,72,.25);border:0}
+.cfp-player .plyr__progress__buffer{height:5px}
+.cfp-player .plyr--full-ui input[type=range]::-webkit-slider-runnable-track{height:5px}
+.cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid){display:inline-flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;padding:4px 8px;min-width:58px;border-radius:8px;color:#fff}
+.cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid) svg{width:22px;height:22px}
+.cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid)::after{font:11px/1 "Open Sans",system-ui,sans-serif;color:rgba(255,255,255,.85);white-space:nowrap}
+.cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid):hover{background:rgba(255,255,255,.12)}
+.cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid):hover::after{color:#fff}
+.cfp-player .plyr__controls .plyr__control[data-plyr="rewind"]::after{content:"-10 s"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="play"]::after{content:"Reproducir"}
+.cfp-player .plyr--playing .plyr__controls .plyr__control[data-plyr="play"]::after{content:"Pausa"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="fast-forward"]::after{content:"+10 s"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="mute"]::after{content:"Volumen"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="captions"]::after{content:"Subtítulos"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="settings"]::after{content:"Ajustes"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="pip"]::after{content:"PIP"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="airplay"]::after{content:"AirPlay"}
+.cfp-player .plyr__controls .plyr__control[data-plyr="fullscreen"]::after{content:"Pantalla completa"}
+.cfp-player .plyr--fullscreen-active .plyr__controls .plyr__control[data-plyr="fullscreen"]::after{content:"Salir"}
+.cfp-player .plyr__volume{display:inline-flex;align-items:center;max-width:120px;min-width:auto}
+.cfp-player .plyr__volume input[type=range]{max-width:70px;margin-left:2px}
+.cfp-player .plyr__controls .plyr__control[data-plyr="fast-forward"]{margin-right:auto}
+.cfp-player .plyr__menu{display:inline-flex}
+.cfp-player .plyr__menu__container{border-radius:10px;font-family:"Open Sans",system-ui,sans-serif}
+.cfp-player .plyr__menu__container .plyr__control{flex-direction:row;min-width:0;padding:8px 12px}
+.cfp-player .plyr__menu__container .plyr__control::after{display:none}
+.cfp-player .plyr--video .plyr__control.plyr__tab-focus,.cfp-player .plyr--video .plyr__control[aria-expanded=true]{background:rgba(225,29,72,.35)}
+.cfp-player .cfp-frame{position:absolute;inset:0;display:none}
+.cfp-player .cfp-frame iframe{display:block;width:100%;height:100%;border:0}
+.cfp-player .cfp-status{position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;gap:10px;padding:12px;font-size:14px;color:var(--cfp-text);background:rgba(25,26,28,.72);backdrop-filter:blur(2px);pointer-events:none}
+.cfp-player .cfp-status.is-error{color:#fff;background:rgba(25,26,28,.86)}
+.cfp-player .cfp-status.is-error .cfp-status-text{padding:8px 12px;border-left:3px solid var(--cfp-err);background:rgba(225,29,72,.12);border-radius:6px}
+.cfp-player .cfp-status.is-error .cfp-spinner{display:none}
+.cfp-player .cfp-spinner{width:22px;height:22px;border-radius:50%;border:3px solid rgba(255,255,255,.18);border-top-color:var(--cfp-primary);animation:cfp-spin .8s linear infinite}
+@keyframes cfp-spin{to{transform:rotate(360deg)}}
+@media (max-width:640px){
+  .cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid){min-width:44px;padding:4px 5px}
+  .cfp-player .plyr__controls .plyr__control:not(.plyr__control--overlaid)::after{display:none}
+  .cfp-player .plyr__control--overlaid{width:64px;height:64px}
+  .cfp-player .plyr__control--overlaid svg{width:26px;height:26px}
+  .cfp-player .cfp-top{flex-wrap:wrap;padding:8px 10px}
+  .cfp-player .cfp-meta{width:100%}
+  .cfp-player .cfp-menus{width:100%;justify-content:flex-start}
+  .cfp-player .cfp-menu-btn{padding:8px 10px;font-size:12px}
+  .cfp-player .cfp-menu-panel{min-width:210px;left:0;right:auto}
+}
+
+/* ===== Página (buscador y utilidades), misma paleta ===== */
+:root{color-scheme:dark}
+html,body{margin:0;background:#141517;color:#e8e8e8;font-family:"Open Sans",system-ui,sans-serif}
+.env{max-width:980px;margin:0 auto;padding:22px 16px 56px}
+.cab{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.cab h1{font-size:18px;font-weight:700;margin:0;letter-spacing:.2px}
+.cab h1 i{color:#e11d48;font-style:normal}
+.cab .srv{margin-left:auto;font-size:12px;color:#9a9a9a;display:flex;align-items:center;gap:7px}
+.cab .led{width:7px;height:7px;border-radius:50%;background:#9a9a9a}
+.cab .led.ok{background:#4caf50;box-shadow:0 0 0 3px rgba(76,175,80,.18)}
+.cab .led.mal{background:#e11d48;box-shadow:0 0 0 3px rgba(225,29,72,.18)}
+.busca{position:relative;margin-bottom:18px}
+.busca input{width:100%;padding:13px 15px;font:16px/1.2 "Open Sans",system-ui,sans-serif;background:#1f2022;color:#fff;border:1px solid #33363c;border-radius:10px;outline:none}
+.busca input:focus{border-color:#e11d48;box-shadow:0 0 0 3px rgba(225,29,72,.16)}
+.sug{position:absolute;left:0;right:0;top:calc(100% + 6px);background:#1f2022;border:1px solid #33363c;border-radius:10px;max-height:62vh;overflow:auto;z-index:60;display:none;box-shadow:0 14px 34px rgba(0,0,0,.55)}
+.sug.abierta{display:block}
+.sug button{display:flex;gap:11px;align-items:center;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #26282c;padding:8px 10px;cursor:pointer;color:#e8e8e8;font:inherit}
+.sug button:last-child{border-bottom:0}
+.sug button:hover{background:#2a2c30}
+.sug img{width:36px;height:54px;object-fit:cover;border-radius:4px;background:#2a2c30;flex:none}
+.sug .t{font-weight:600;font-size:14px}
+.sug .m{font-size:12px;color:#9a9a9a}
+.sug .k{margin-left:auto;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#9a9a9a;border:1px solid #33363c;border-radius:999px;padding:3px 8px}
+.sug .nada{padding:14px;color:#9a9a9a;font-size:14px}
+.fila{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.fila label{font-size:12px;color:#9a9a9a;text-transform:uppercase;letter-spacing:.5px}
+select,.btn{font:600 13px/1 "Open Sans",system-ui,sans-serif;color:#e8e8e8;background:#2a2c30;border:1px solid #33363c;border-radius:8px;padding:9px 12px;cursor:pointer}
+select:focus-visible,.btn:focus-visible{outline:2px solid #e11d48;outline-offset:2px}
+.btn:hover{background:#35383d}
+.btn.rojo{background:#e11d48;border-color:transparent;color:#fff}
+.btn.rojo:hover{background:#c8143c}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.datos{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;font-size:12px;color:#9a9a9a}
+.datos div{background:#1f2022;border:1px solid #26282c;border-radius:8px;padding:8px 11px}
+.datos b{color:#e8e8e8;font-weight:600}
+.nota{font-size:12px;color:#9a9a9a;margin:14px 0 0}
+.oculto{display:none!important}
+
+/* ===== Modo incrustable (/embed/…): solo el reproductor, a pantalla completa del iframe ===== */
+body.embed{background:#000;overflow:hidden}
+body.embed .env{max-width:none;margin:0;padding:0;height:100vh}
+body.embed .cab,body.embed .busca,body.embed #filaSerie,body.embed .fila,body.embed #datos,body.embed .nota{display:none!important}
+body.embed .cfp-player{margin:0;height:100vh;display:flex;flex-direction:column;border:0;border-radius:0;box-shadow:none}
+body.embed .cfp-player .cfp-top{border-radius:0;flex:none}
+body.embed .cfp-player .cfp-screen{flex:1;aspect-ratio:auto;border-radius:0;min-height:0}
+body.embed .cfp-player .plyr--video{border-radius:0}
+</style>
+<script>window.PM_UI="ZRHmHd8DugfaiPEXVKkxN8hINM6jCCQTixDTj0R7qdon7lUd4O1t4lIvyNbIk3LypPEaLhKmZ0Y3TXtSJg-SrFwLhNUufX3A5aMbnMy5Bbc2mtdpxG1ENT5tJWSR_plQCTg0OYcSVT2Fp69vItejqZtcvhJHqpVApoSR";</script><script>window.PM_EMBED={"tmdb":1400837,"type":"movie","season":null,"episode":null,"lang":"LAT","autoplay":true};</script></head>
+<body class="embed">
+<div class="env">
+  <div class="cab">
+    <h1>Pelis Master<i>.</i></h1>
+    <span class="srv"><span class="led" id="led"></span><span id="ledTx">comprobando…</span></span>
+  </div>
+
+  <div class="busca">
+    <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Busca una película o serie (ej. Matrix, Arcane)" aria-label="Buscar título">
+    <div class="sug" id="sug" role="listbox" aria-label="Resultados"></div>
+  </div>
+
+  <div class="fila oculto" id="filaSerie">
+    <label for="temp">Temporada</label><select id="temp"></select>
+    <label for="epi">Episodio</label><select id="epi"></select>
+    <button class="btn rojo" id="verEp">Reproducir episodio</button>
+  </div>
+
+  <!-- Reproductor: misma estructura y estilo que el plugin coflix-player -->
+  <div class="cfp-player" id="player">
+    <div class="cfp-top">
+      <div class="cfp-meta">
+        <span class="cfp-title" id="cfpTitle">Elige un título para empezar</span>
+        <span class="cfp-badge" id="cfpBadge"></span>
+      </div>
+      <div class="cfp-menus" id="cfpMenus"></div>
+    </div>
+    <div class="cfp-screen">
+      <div class="cfp-videowrap" id="cfpWrap"><video class="cfp-video" id="cfpVideo" playsinline controls></video></div>
+      <div class="cfp-frame" id="cfpFrame"></div>
+      <div class="cfp-status" id="cfpStatus" style="display:none"><span class="cfp-spinner"></span><span class="cfp-status-text" id="cfpStatusTx"></span></div>
+    </div>
+  </div>
+
+  <div class="fila">
+    <select id="idioma" aria-label="Idioma preferido">
+      <option value="">Todos los idiomas</option>
+      <option value="LAT">Latino</option>
+      <option value="ESP">Castellano</option>
+      <option value="SUB">Subtitulado</option>
+      <option value="ENG">English</option>
+    </select>
+  </div>
+
+  <div class="datos" id="datos"></div>
+  <p class="nota">Solo se listan servidores comprobados. Más rápido = el vídeo va directo del CDN a tu navegador · Lento = el enlace está atado a la IP del servidor y el vídeo pasa por la API. Los más rápidos siempre van arriba.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plyr/3.7.8/plyr.min.js"></script>
 <script>
-window.PM_UI="TEST_UI_MOVIE_000000000000000000000000000000000000000000";
-window.PM_EMBED={"tmdb":1400837,"type":"movie","lang":"LAT","autoplay":true};
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function getJSON(url) {
+    // PM_UI: credencial de esta página (la pone el servidor cuando la API exige pase)
+    if (window.PM_UI) url += (url.indexOf('?') < 0 ? '?' : '&') + 'ui=' + encodeURIComponent(window.PM_UI);
+    return fetch(url).then(function (r) { return r.json(); });
+  }
+  function b64u(s) { return btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function corto(h) { return String(h || '').replace(/^(www\.|player\.)/, '').replace(/\.(com|net|to|sx|org|zip|co|xyz|lol|tv|ws|cc|live|site|pro)$/, ''); }
+
+  var LANG_ORDER = ['LAT', 'ESP', 'SUB', 'ENG'];
+  var LANG_NOMBRE = { LAT: 'Latino', ESP: 'Castellano', SUB: 'Subtitulado', ENG: 'English' };
+  var hoverCapable = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  // <pistas> (same code in APIpelismaster src/ui.html and MovieMasterCMS money-player/assets/api-player.js)
+  // Audio track and subtitles for the server's language. Some HLS bring several audio tracks (es + en + pt…) and their
+  // DEFAULT is not always the one of the label (LAT with English first, SUB with Spanish first); hls.js plays the DEFAULT.
+  // LANGUAGE only says "es" (never es-419): Latino and Castellano are told apart by the name, when it says so.
+  // Returns {audio, sub, ok}: audio = index or -1 (leave it), sub = index or -1 (off), ok = false when the video brings
+  // several tracks and none in that language (better another server of that language, if one is left).
+  function eligePistas(audio, subs, lang) {
+    audio = audio || []; subs = subs || [];
+    var es = function (t) { return /^(es|spa)\b/i.test(t.lang || '') || /espa|spanish|castell|latin|испан/i.test(t.name || ''); };
+    var lat = function (t) { return /latin|419|m[eé]xic/i.test(t.name || '') || /^es-(419|mx|us|ar|co|cl|pe|ve)/i.test(t.lang || ''); };
+    var cas = function (t) { return /castell|espa[ñn]a|spain|europ|ib[eé]ric/i.test(t.name || '') || /^es-es/i.test(t.lang || ''); };
+    var en = function (t) { return /^(en|eng)\b/i.test(t.lang || '') || /english|ingl[eé]s|англ/i.test(t.name || ''); };
+    var orig = function (t) { return !es(t); };
+    var idx = function (l, f) { for (var i = 0; i < l.length; i++) if (f(l[i])) return i; return -1; };
+    var pref = function (l, f) { var i = idx(l, function (t) { return t['default'] && f(t); }); return i < 0 ? idx(l, f) : i; };
+    var r = { audio: -1, sub: -1, ok: true };
+    if (lang === 'LAT' || lang === 'ESP') {
+      var gusta = lang === 'LAT' ? lat : cas, otra = lang === 'LAT' ? cas : lat;
+      r.audio = idx(audio, gusta);
+      if (r.audio < 0) r.audio = pref(audio, function (t) { return es(t) && !otra(t); });
+      if (r.audio < 0) r.audio = pref(audio, es);
+    } else if (lang === 'ENG') {
+      r.audio = pref(audio, en);
+      if (r.audio < 0) r.audio = pref(audio, orig);
+    } else if (lang === 'SUB') {
+      // original version + Spanish subtitles; with no Spanish subtitles, the Spanish audio beats an original nobody follows
+      r.sub = idx(subs, function (t) { return es(t) && !t.forced; });
+      var o = idx(audio, function (t) { return orig(t) && /original/i.test(t.name || ''); });
+      if (o < 0) o = pref(audio, orig);
+      r.audio = r.sub >= 0 || !audio.some(es) ? o : pref(audio, es);
+      return r;
+    } else return r;
+    if (r.audio < 0 && audio.length > 1) r.ok = false;
+    return r;
+  }
+  // </pistas>
+
+  var openMenu = null;
+  function closeMenus() { if (openMenu) { openMenu.classList.remove('is-open'); var b = openMenu.querySelector('.cfp-menu-btn'); if (b) b.setAttribute('aria-expanded', 'false'); openMenu = null; } }
+  document.addEventListener('click', function (e) { if (openMenu && !openMenu.contains(e.target)) closeMenus(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeMenus(); $('sug').classList.remove('abierta'); } });
+
+  // ---------- estado ----------
+  var sel = null;        // título elegido {tmdb, imdb, type, title, year, season, episode}
+  var servers = [];      // servidores VERIFICADOS de /servers
+  var activo = null;     // id (base64url del embed) del servidor que suena
+  var verificando = false;
+  var cargaSeq = 0;      // sube al cambiar de título/episodio: invalida respuestas viejas
+  var playSeq = 0;       // sube al cambiar de servidor: invalida reproducciones viejas
+  var plyr = null, hls = null, buscando = 0, timer = null;
+
+  getJSON('/health').then(function (d) {
+    $('led').className = 'led ' + (d.ok ? 'ok' : 'mal');
+    $('ledTx').textContent = d.ok ? 'API activa' : 'API con fallos';
+  }).catch(function () { $('led').className = 'led mal'; $('ledTx').textContent = 'sin conexión'; });
+
+  // ---------- Plyr con la misma disposición que el plugin ----------
+  if (window.Plyr) {
+    // Plyr recuerda si los subtítulos iban encendidos; aquí los decide el idioma de cada vídeo
+    try { var guardado = JSON.parse(localStorage.getItem('pm')); if (guardado) { delete guardado.captions; localStorage.setItem('pm', JSON.stringify(guardado)); } } catch (e) {}
+    plyr = new Plyr($('cfpVideo'), {
+      controls: ['play-large', 'current-time', 'progress', 'duration', 'rewind', 'play', 'fast-forward', 'mute', 'volume', 'pip', 'airplay', 'fullscreen'],
+      settings: [], seekTime: 10, speed: { selected: 1, options: [0.75, 1, 1.25, 1.5, 2] },
+      i18n: { play: 'Reproducir', pause: 'Pausa', rewind: 'Retroceder {seektime} s', fastForward: 'Avanzar {seektime} s', mute: 'Silenciar', unmute: 'Activar sonido', settings: 'Ajustes', speed: 'Velocidad', normal: 'Normal', quality: 'Calidad', enterFullscreen: 'Pantalla completa', exitFullscreen: 'Salir de pantalla completa', pip: 'PIP', captions: 'Subtítulos', enableCaptions: 'Activar subtítulos', disableCaptions: 'Desactivar subtítulos' },
+      ratio: '16:9', keyboard: { focused: true, global: false }, tooltips: { controls: false, seek: true }, storage: { enabled: true, key: 'pm' },
+      captions: { active: false, language: 'es', update: true } // los de hls.js llegan después; se encienden solo en Subtitulado
+    });
+    plyr.on('ready', function () {
+      var c = document.querySelector('.cfp-player .plyr__controls');
+      if (!c || c.querySelector('.cfp-bar')) return;
+      var bar = document.createElement('div'); bar.className = 'cfp-bar';
+      ['.plyr__time--current', '.plyr__progress__container', '.plyr__time--duration'].forEach(function (s) { var n = c.querySelector(s); if (n) bar.appendChild(n); });
+      c.insertBefore(bar, c.firstChild);
+    });
+  }
+
+  function estado(txt, kind) {
+    var s = $('cfpStatus');
+    s.className = 'cfp-status' + (kind ? ' is-' + kind : '');
+    $('cfpStatusTx').textContent = txt || '';
+    s.style.display = txt ? '' : 'none';
+  }
+  function badge(txt, tipo) {
+    var b = $('cfpBadge');
+    b.textContent = txt || '';
+    b.className = 'cfp-badge' + (tipo ? ' is-' + tipo : '');
+  }
+
+  // ---------- buscador ----------
+  $('q').addEventListener('input', function () {
+    var s = $('q').value.trim(); clearTimeout(timer);
+    if (s.length < 2) { $('sug').classList.remove('abierta'); return; }
+    var mio = ++buscando;
+    timer = setTimeout(function () {
+      getJSON('/search?q=' + encodeURIComponent(s)).then(function (d) { if (mio === buscando) pintaSug(d.results || []); })
+        .catch(function () { if (mio === buscando) { $('sug').innerHTML = '<div class="nada">No se pudo buscar. Reintenta.</div>'; $('sug').classList.add('abierta'); } });
+    }, 220);
+  });
+  $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') { var b = $('sug').querySelector('button'); if (b) b.click(); } });
+
+  function pintaSug(r) {
+    var sug = $('sug');
+    if (!r.length) { sug.innerHTML = '<div class="nada">Sin resultados. Prueba con el título original.</div>'; sug.classList.add('abierta'); return; }
+    sug.innerHTML = '';
+    r.forEach(function (x) {
+      var b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'option');
+      b.innerHTML = (x.poster ? '<img src="' + esc(x.poster) + '" alt="" loading="lazy">' : '<div style="width:36px;height:54px;border-radius:4px;background:#2a2c30"></div>')
+        + '<div><div class="t"></div><div class="m">' + (x.year || 's/f') + ' · tmdb ' + x.tmdb + '</div></div>'
+        + '<span class="k">' + (x.type === 'tv' ? 'serie' : 'película') + '</span>';
+      b.querySelector('.t').textContent = x.title;
+      b.onclick = function () { elige(x); };
+      sug.appendChild(b);
+    });
+    sug.classList.add('abierta');
+  }
+
+  function elige(x) {
+    $('sug').classList.remove('abierta');
+    sel = { tmdb: x.tmdb, imdb: x.imdb, type: x.type, title: x.title, year: x.year, season: 1, episode: 1 };
+    $('cfpTitle').textContent = x.title + (x.year ? ' (' + x.year + ')' : '');
+    if (x.type === 'tv') { $('filaSerie').classList.remove('oculto'); cargaTemporadas(); }
+    else { $('filaSerie').classList.add('oculto'); cargar(); }
+  }
+
+  // ---------- series ----------
+  function cargaTemporadas() {
+    var t = $('temp'); t.innerHTML = '';
+    for (var i = 1; i <= 15; i++) { var o = document.createElement('option'); o.value = i; o.textContent = i; t.appendChild(o); }
+    t.value = 1;
+    t.onchange = function () { cargaEpisodios(+t.value); };
+    $('verEp').onclick = function () { sel.season = +$('temp').value; sel.episode = +$('epi').value; cargar(); };
+    cargaEpisodios(1, true);
+  }
+  function cargaEpisodios(t, auto) {
+    var e = $('epi'); e.innerHTML = '<option>…</option>'; $('verEp').disabled = true;
+    getJSON('/episodes?tmdb=' + sel.tmdb + '&type=tv&season=' + t).then(function (d) {
+      var it = (d.items || []).filter(function (x) { return x.playable !== false; });
+      e.innerHTML = '';
+      (it.length ? it : [{ episode: 1 }]).forEach(function (x) { var o = document.createElement('option'); o.value = x.episode; o.textContent = x.episode; e.appendChild(o); });
+      $('verEp').disabled = false;
+      if (auto) { sel.season = t; sel.episode = +e.value; cargar(); }
+    }).catch(function () { e.innerHTML = '<option value="1">1</option>'; $('verEp').disabled = false; });
+  }
+
+  // ---------- carga de un título/episodio ----------
+  function params() {
+    var p = 'tmdb=' + sel.tmdb + '&type=' + sel.type;
+    if (sel.type === 'tv') p += '&season=' + sel.season + '&episode=' + sel.episode;
+    if ($('idioma').value === 'ENG') p += '&lang=ENG';
+    return p;
+  }
+
+  // Carga de un título: se consultan TODAS las fuentes a la vez y, mientras, solo se ve el loading
+  // del reproductor. Cuando todas han terminado (o a los ESPERA_MAX) se pintan los menús UNA vez y
+  // arranca el más rápido. Después no se añade ni se quita nada: la lista es fija.
+  var ESPERA_MAX = 60000;
+  var listoServidor = false, listoVidsrc = false, mostrado = false, finServidor = false;
+  var quiero = null, caducos = 0, reanudar = 0; // servidor al que volver, listas pedidas por caducidad y segundo donde seguir
+
+  function cargar() {
+    if (!sel) return;
+    var mio = ++cargaSeq;
+    playSeq++;                       // cualquier reproducción en curso deja de valer
+    detener();
+    servers = []; activo = null; verificando = true;
+    listoServidor = false; listoVidsrc = true; mostrado = false; finServidor = false;
+    pintaMenus(); badge(''); $('datos').innerHTML = '';
+    estado('Buscando en todas las fuentes…', 'loading');
+    pideServidores(mio, 0);
+    setTimeout(function () { if (mio === cargaSeq && !mostrado) muestra(mio); }, ESPERA_MAX);
+  }
+
+  function intentaMostrar(mio) {
+    if (mio !== cargaSeq || mostrado) return;
+    if (listoServidor && listoVidsrc) muestra(mio);
+  }
+  function arrancaMejor() {
+    servers.sort(function (a, b) { return ((a.mode === 'proxy') - (b.mode === 'proxy')) || ((a.detras ? 1 : 0) - (b.detras ? 1 : 0)) || ((a.src || 9) - (b.src || 9)); });
+    // lista pedida de nuevo porque caducó: se vuelve al servidor que estaba elegido
+    var pedido = quiero && servers.filter(function (x) { return x.k === quiero; })[0];
+    quiero = null;
+    if (pedido) return reproduce(pedido);
+    // primero el idioma elegido; si no hay, el mejor de todos
+    var f = $('idioma').value, lista = servers.filter(function (x) { return !f || x.lang === f; });
+    if (!lista.length) lista = servers;
+    reproduce(lista.filter(function (x) { return x.mode !== 'proxy'; })[0] || lista[0]);
+  }
+  function muestra(mio) {
+    if (mio !== cargaSeq || mostrado) return;
+    mostrado = true;
+    verificando = false;
+    pintaMenus();
+    pintaDatos(ultimoResumen || {});
+    if (servers.length) arrancaMejor();
+    else estado('No hay ningún servidor disponible para este título ahora mismo.', 'error');
+  }
+
+  function pideServidores(mio, vuelta) {
+    getJSON('/servers?' + params()).then(function (d) {
+      if (mio !== cargaSeq || mostrado) return;   // lista ya mostrada: es fija
+      var nuevos = (d.servers || []).map(function (s) { return { id: s.id, k: s.k || s.id, site: s.site, src: s.src, host: s.host || '', name: s.name, lang: s.lang, mode: s.mode, type: s.type, detras: !!s.detras, video: '/video?' + params() + '&noiframe=1&embed=' + s.id }; });
+      nuevos.forEach(function (n) { if (!servers.some(function (x) { return x.k === n.k; })) servers.push(n); });
+      ultimoResumen = d;
+      // incrustado: el título lo da la API (en el index ya lo puso el buscador)
+      if (window.PM_EMBED && d.meta && d.meta.title) $('cfpTitle').textContent = d.meta.title + (sel.type === 'tv' ? ' · T' + sel.season + ' E' + sel.episode : (d.meta.year ? ' (' + d.meta.year + ')' : ''));
+      if (!d.pendiente) { listoServidor = true; finServidor = true; intentaMostrar(mio); return; }
+      if (vuelta < 80) setTimeout(function () { if (mio === cargaSeq && !mostrado) pideServidores(mio, vuelta + 1); }, 3000);
+      else { listoServidor = true; intentaMostrar(mio); }
+    }).catch(function () {
+      if (mio !== cargaSeq || mostrado) return;
+      if (vuelta < 80) setTimeout(function () { if (mio === cargaSeq && !mostrado) pideServidores(mio, vuelta + 1); }, 4000);
+      else { listoServidor = true; intentaMostrar(mio); }
+    });
+  }
+
+  // ---------- menús: uno por fuente, servidores agrupados por idioma ----------
+  function pintaMenus() {
+    if (!mostrado) { $('cfpMenus').innerHTML = ''; return; } // mientras carga, solo el loading del reproductor
+    var filtro = $('idioma').value;
+    if (sel && (filtro === 'ENG') !== servers.some(function (x) { return x.lang === 'ENG'; })) { cargar(); return; }
+    var lista = servers.filter(function (s) { return !filtro || s.lang === filtro; });
+    if (!lista.length) {
+      $('cfpMenus').innerHTML = verificando
+        ? '<span class="cfp-badge">Verificando servidores…</span>'
+        : (servers.length ? '<span class="cfp-badge">Sin servidores en ese idioma</span>' : '');
+      return;
+    }
+    var fuentes = [];
+    lista.forEach(function (s) { if (fuentes.indexOf(s.site) < 0) fuentes.push(s.site); });
+    fuentes.sort(function (a, b) { return srcDe(a) - srcDe(b); });
+    $('cfpMenus').innerHTML = fuentes.map(function (f) {
+      var deFuente = lista.filter(function (s) { return s.site === f; });
+      var tieneActivo = deFuente.some(function (s) { return s.id === activo; });
+      var grupos = {};
+      deFuente.forEach(function (s) { var l = LANG_NOMBRE[s.lang] ? s.lang : 'OTRO'; (grupos[l] = grupos[l] || []).push(s); });
+      var claves = Object.keys(grupos).sort(function (a, b) { var ia = LANG_ORDER.indexOf(a), ib = LANG_ORDER.indexOf(b); return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib); });
+      var items = claves.map(function (l) {
+        return '<div class="cfp-menu-group">' + esc(LANG_NOMBRE[l] || 'Otro idioma') + '</div>' + grupos[l].slice().sort(function (a, b) { return (a.mode === 'proxy') - (b.mode === 'proxy'); }).map(function (s) {
+          return '<button type="button" class="cfp-item' + (s.id === activo ? ' is-active' : '') + (s.mode === 'proxy' ? ' is-proxy' : '') + '" data-id="' + esc(s.id) + '" role="menuitem" title="' + esc(s.host) + '">'
+            + '<span class="cfp-item-dot"></span><span class="cfp-item-name">' + esc(corto(s.name || s.host)) + '</span>'
+            + '<span class="cfp-item-kind">' + (s.mode === 'proxy' ? 'Lento' : 'Más rápido') + '</span></button>';
+        }).join('');
+      }).join('');
+      return '<div class="cfp-menu' + (tieneActivo ? ' has-active' : '') + '">'
+        + '<button type="button" class="cfp-menu-btn" aria-haspopup="menu" aria-expanded="false" title="' + esc(f) + '">' + (tieneActivo ? '<span class="cfp-menu-dot"></span>' : '')
+        + 'Fuente ' + srcDe(f) + '<span class="cfp-menu-count">' + deFuente.length + '</span><span class="cfp-menu-caret"></span></button>'
+        + '<div class="cfp-menu-panel" role="menu">' + items + '</div></div>';
+    }).join('') + (verificando ? '<span class="cfp-badge">verificando…</span>' : '');
+
+    [].forEach.call($('cfpMenus').querySelectorAll('.cfp-menu'), function (m) {
+      var btn = m.querySelector('.cfp-menu-btn');
+      btn.onclick = function (e) {
+        e.stopPropagation();
+        var abierto = m.classList.contains('is-open');
+        if (abierto && !hoverCapable) { closeMenus(); return; }
+        closeMenus(); m.classList.add('is-open'); btn.setAttribute('aria-expanded', 'true'); openMenu = m;
+      };
+      if (hoverCapable) {
+        m.onmouseenter = function () { closeMenus(); m.classList.add('is-open'); btn.setAttribute('aria-expanded', 'true'); openMenu = m; };
+        m.onmouseleave = function () { if (openMenu === m) closeMenus(); };
+      }
+      [].forEach.call(m.querySelectorAll('.cfp-item'), function (it) {
+        it.onclick = function (e) {
+          e.stopPropagation(); closeMenus();
+          var id = it.getAttribute('data-id');
+          if (id === activo) return;
+          var s = servers.filter(function (x) { return x.id === id; })[0];
+          if (s) reproduce(s);
+        };
+      });
+    });
+  }
+  function srcDe(site) {
+    var s = servers.filter(function (x) { return x.site === site && x.src; })[0];
+    return s ? s.src : 9;
+  }
+
+  // ---------- reproducción ----------
+  function detener() {
+    var fr = $('cfpFrame'); fr.innerHTML = ''; fr.style.display = 'none';
+    if (hls) { var v = hls; hls = null; try { v.off(Hls.Events.ERROR); v.destroy(); } catch (e) {} }
+    var video = $('cfpVideo');
+    try { video.pause(); } catch (e) {}
+    video.removeAttribute('src');
+    try { video.load(); } catch (e) {}
+  }
+
+  function reproduce(s) {
+    var mio = ++playSeq;
+    var anterior = activo;
+    activo = s.id;
+    pintaMenus();
+    estado('Cargando ' + corto(s.name || s.host) + '…', 'loading');
+    var iba = reanudar || $('cfpVideo').currentTime || 0; // por si hay que pedir la lista de nuevo
+    detener();
+    var video = $('cfpVideo');
+    var fallo = function (msg) {
+      if (mio !== playSeq) return;
+      detener();
+      // se quita de la lista: ya no funciona
+      servers = servers.filter(function (x) { return x.id !== s.id; });
+      activo = null;
+      pintaMenus();
+      // el siguiente, del mismo idioma mientras quede alguno
+      var quiere = $('idioma').value || s.lang, resto = servers.filter(function (x) { return x.id !== anterior; });
+      var sig = resto.filter(function (x) { return x.lang === quiere; })[0] || servers.filter(function (x) { return x.lang === quiere; })[0] || resto[0] || servers[0];
+      if (sig) { estado(msg + ' Cambiando a ' + corto(sig.name || sig.host) + '…', 'loading'); setTimeout(function () { if (mio === playSeq) reproduce(sig); }, 900); }
+      else estado(msg + ' No quedan más servidores.', 'error');
+    };
+    var listo = function () {
+      if (mio !== playSeq) return;
+      estado('');
+      caducos = 0;
+      if (reanudar > 0) { try { video.currentTime = reanudar; } catch (e) {} reanudar = 0; }
+      badge(corto(s.name || s.host) + (LANG_NOMBRE[s.lang] ? ' · ' + LANG_NOMBRE[s.lang] : '') + ' · ' + (s.mode === 'proxy' ? 'Lento' : 'Más rápido'), s.mode === 'proxy' ? 'embed' : 'direct');
+      pintaDatosActivo(s);
+      // incrustado con ?autoplay=0: la primera carga queda lista pero sin arrancar
+      if (window.PM_EMBED && window.PM_EMBED.autoplay === false && !window.PM_YA_INICIADO) { window.PM_YA_INICIADO = true; return; }
+      window.PM_YA_INICIADO = true;
+      var pr = plyr ? plyr.play() : video.play();
+      if (pr && pr.catch) pr.catch(function () { video.muted = true; if (plyr) plyr.muted = true; (plyr ? plyr.play() : video.play()).catch(function () {}); });
+    };
+    // pista de audio/subtítulos del idioma del servidor; si el vídeo no lo trae y queda otro servidor de ese idioma, a él
+    var pistas = function (audio, subs) {
+      var p = eligePistas(audio, subs, s.lang);
+      if (!p.ok && servers.some(function (x) { return x.id !== s.id && x.lang === s.lang; })) { fallo('Este servidor no trae audio en ' + LANG_NOMBRE[s.lang] + '.'); return null; }
+      return p;
+    };
+    // Plyr pinta los subtítulos él mismo (esconde los del navegador): se encienden o apagan a través de él
+    var subtitulos = function (on) {
+      if (!plyr) return;
+      try { plyr.toggleCaptions(on); } catch (e) {}
+      setTimeout(function () { if (mio === playSeq) try { plyr.toggleCaptions(on); } catch (e) {} }, 400); // la pista de texto llega un poco después
+    };
+    var pon = function (src, tipo) {
+    if (tipo !== 'mp4' && window.Hls && Hls.isSupported()) {
+      var h = hls = new Hls({ maxBufferLength: 30, backBufferLength: 60, manifestLoadingMaxRetry: 2, levelLoadingMaxRetry: 2, fragLoadingMaxRetry: 3 });
+      var recuperado = false;
+      // las pistas del manifiesto deciden si este vídeo vale; hls.js las da después (…_TRACKS_UPDATED) y ahí se eligen
+      var man = { audio: [], subs: [] };
+      h.on(Hls.Events.MANIFEST_PARSED, function (ev, d) {
+        if (hls !== h) return;
+        man = { audio: d.audioTracks || [], subs: d.subtitleTracks || [] };
+        if (!man.subs.length) subtitulos(false);
+        if (pistas(man.audio, man.subs)) listo();
+      });
+      h.on(Hls.Events.AUDIO_TRACKS_UPDATED, function () {
+        var i = eligePistas(h.audioTracks, man.subs, s.lang).audio;
+        if (hls === h && i >= 0 && i !== h.audioTrack) h.audioTrack = i;
+      });
+      h.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function () {
+        if (hls !== h) return;
+        var i = eligePistas(man.audio, h.subtitleTracks, s.lang).sub;
+        h.subtitleTrack = i;
+        subtitulos(i >= 0);
+      });
+      h.on(Hls.Events.ERROR, function (ev, data) {
+        if (hls !== h || mio !== playSeq || !data.fatal) return;
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recuperado) { recuperado = true; h.recoverMediaError(); return; }
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.details !== 'manifestLoadError' && !recuperado) { recuperado = true; h.startLoad(); return; }
+        fallo('Este servidor no respondió.');
+      });
+      h.loadSource(src);
+      h.attachMedia(video);
+    } else {
+      video.src = src;
+      video.onloadedmetadata = function () {
+        // HLS nativo (Safari/iPhone): sus pistas están en el propio <video>
+        var at = video.audioTracks || [], tt = [].filter.call(video.textTracks || [], function (t) { return t.kind === 'subtitles' || t.kind === 'captions'; });
+        var p = pistas([].map.call(at, function (t) { return { name: t.label, lang: t.language, 'default': t.enabled }; }), tt.map(function (t) { return { name: t.label, lang: t.language }; }));
+        if (!p) return;
+        if (p.audio >= 0) for (var i = 0; i < at.length; i++) at[i].enabled = i === p.audio;
+        tt.forEach(function (t, i) { t.mode = i === p.sub ? 'showing' : 'disabled'; });
+        subtitulos(p.sub >= 0);
+        listo();
+      };
+      video.onerror = function () { fallo('Este servidor no respondió.'); };
+    }
+    };
+    // Estreno: el identificador de la lista dura unos minutos y solo abre el enlace de sesión, que
+    // es el que se reproduce. Si ya caducó (cambio de servidor al rato) se pide la lista de nuevo.
+    fetch(s.video + '&r=1').then(function (r) {
+      if (mio !== playSeq) return;
+      if ((r.status === 410 || r.status === 403) && caducos < 3) { caducos++; quiero = s.k; if (iba > 5) reanudar = iba; cargar(); return; }
+      if (!r.ok) return fallo('Este servidor no respondió.');
+      return r.json().then(function (d) {
+        if (mio !== playSeq) return;
+        if (d.type === 'iframe') {
+          var fr = $('cfpFrame'), ifr = document.createElement('iframe');
+          ifr.src = d.url; ifr.allowFullscreen = true; ifr.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture'); ifr.referrerPolicy = 'origin';
+          fr.innerHTML = ''; fr.appendChild(ifr); fr.style.display = 'block';
+          estado(''); caducos = 0;
+          badge(corto(s.name || s.host) + (LANG_NOMBRE[s.lang] ? ' · ' + LANG_NOMBRE[s.lang] : ''), 'embed');
+          pintaDatosActivo(s);
+          return;
+        }
+        pon(d.url, d.type || s.type);
+      });
+    }).catch(function () { fallo('Este servidor no respondió.'); });
+  }
+
+  // ---------- datos ----------
+  var ultimoResumen = null;
+  function pintaDatos(d) { ultimoResumen = d; pintaDatosActivo(servers.filter(function (x) { return x.id === activo; })[0]); }
+  function pintaDatosActivo(s) {
+    var d = ultimoResumen || {};
+    var m = d.meta || {};
+    var cuenta = { LAT: 0, ESP: 0, SUB: 0, ENG: 0 };
+    servers.forEach(function (x) { if (cuenta[x.lang] != null) cuenta[x.lang]++; });
+    var filas = [
+      ['Título', (m.title || (sel && sel.title) || '—') + (sel && sel.type === 'tv' ? ' · T' + sel.season + ' E' + sel.episode : '')],
+      ['Servidor', s ? corto(s.name || s.host) + (s.host ? ' (' + s.host + ')' : '') : '—'],
+      ['Fuente', s ? 'Fuente ' + srcDe(s.site) + ' · ' + s.site : '—'],
+      ['Idioma', s ? (LANG_NOMBRE[s.lang] || s.lang || '—') : '—'],
+      ['Velocidad', s ? (s.mode === 'proxy' ? 'Lento (el vídeo pasa por el servidor)' : 'Más rápido (directo del CDN a tu navegador)') : '—'],
+      ['Verificados', verificando ? 'comprobando…' : servers.length + ' de ' + (d.probados || servers.length) + ' funcionan'],
+      ['Por idioma', 'Latino ' + cuenta.LAT + ' · Castellano ' + cuenta.ESP + ' · Subtitulado ' + cuenta.SUB + (cuenta.ENG ? ' · English ' + cuenta.ENG : '')]
+    ];
+    $('datos').innerHTML = '';
+    filas.forEach(function (f) { var el = document.createElement('div'); el.innerHTML = f[0] + ': <b></b>'; el.querySelector('b').textContent = f[1]; $('datos').appendChild(el); });
+  }
+
+  // ---------- idioma ----------
+  $('idioma').onchange = function () {
+    pintaMenus();
+    var filtro = $('idioma').value;
+    var actual = servers.filter(function (x) { return x.id === activo; })[0];
+    if (filtro && (!actual || actual.lang !== filtro)) {
+      var s = servers.filter(function (x) { return x.lang === filtro; })[0];
+      if (s) reproduce(s); else if (!verificando) estado('No hay servidores en ' + LANG_NOMBRE[filtro] + ' para este título.', 'error');
+    }
+  };
+
+  // ---------- modo incrustable: /embed/movie/{tmdb} · /embed/tv/{tmdb}/{t}/{e} ----------
+  if (window.PM_EMBED) {
+    var E = window.PM_EMBED;
+    sel = { tmdb: E.tmdb, type: E.type === 'tv' ? 'tv' : 'movie', title: '', season: E.season || 1, episode: E.episode || 1 };
+    if (E.lang && LANG_NOMBRE[E.lang]) $('idioma').value = E.lang;
+    $('cfpTitle').textContent = '';
+    cargar();
+
+    // Página anfitriona (MovieMaster u otra): se le avisa del progreso y del final para su "siguiente episodio".
+    // Si responde 'mm:host', la pantalla completa la pone ella sobre su contenedor (así no se sale al cambiar de episodio).
+    if (window.parent !== window) {
+      var anfitrion = function (m) { try { window.parent.postMessage(m, '*'); } catch (e) {} };
+      var vid = $('cfpVideo'), ultimo = 0;
+      vid.addEventListener('timeupdate', function () {
+        var ahora = Date.now();
+        if (ahora - ultimo < 1000 || !isFinite(vid.duration) || !vid.duration) return;
+        ultimo = ahora;
+        anfitrion({ type: 'mm:time', currentTime: vid.currentTime, duration: vid.duration });
+      });
+      vid.addEventListener('ended', function () { anfitrion('mm:ended'); });
+      window.addEventListener('message', function (e) {
+        if (e.source === window.parent && e.data === 'mm:host' && plyr) plyr.fullscreen.toggle = function () { anfitrion('mm:fullscreen'); };
+      });
+      anfitrion('mm:hello');
+    }
+  }
+})();
 </script>
 </body>
 </html>
