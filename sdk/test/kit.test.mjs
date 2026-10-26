@@ -206,7 +206,7 @@ test("crypto gives the app's vectors", () => {
   const c = kino.crypto;
   assert.equal(c.hash("md5", "abc"), "900150983cd24fb0d6963f7d28e17f72");
   assert.equal(c.hmac("sha256", "Jefe", "what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-  const key = "2b7e151628aed2a6abf7158809cf4f3c", iv = "000102030405060708090a0b0c0d0e0f";
+  const key = "2b7e151628aed2a6abf7158809cf4f3c", iv = "000102030405060708090a0b0c0d0e0f"; // secretscan:allow (public constant/test vector)
   const enc = c.encrypt("aes-128-cbc", { key, iv, keyEncoding: "hex", ivEncoding: "hex", data: "hola mundo", outputEncoding: "hex" });
   assert.equal(enc, "91d3f1bb5aa666718bdcd8514571632a");
   assert.equal(c.decrypt("aes-128-cbc", { key, iv, keyEncoding: "hex", ivEncoding: "hex", data: enc, inputEncoding: "hex" }), "hola mundo");
@@ -1877,7 +1877,7 @@ test("a cookie value equal to an opened secret comes back as its marker", async 
 });
 
 test("the --replay 'no recorded answer' error redacts a sealed value instead of just cutting it", async () => {
-  const { dir } = withSecretsFile({ apiKey: "SUPER-SECRET-VALUE-12345" });
+  const { dir } = withSecretsFile({ apiKey: "SUPER-SECRET-VALUE-12345" }); // secretscan:allow (public constant/test vector)
   const m = JSON.parse(manifest({ hosts: ["api.example.com"], secrets: { apiKey: "x" } }));
   const emptyTape = join(dir, "empty-tape.json");
   writeFileSync(emptyTape, JSON.stringify([]));
@@ -1890,7 +1890,7 @@ test("the --replay 'no recorded answer' error redacts a sealed value instead of 
 });
 
 test("--record never writes a plain secret value (or a random marker another runtime won't recognize) to the tape file, and --replay round-trips", async () => {
-  const { dir } = withSecretsFile({ apiKey: "SUPER-SECRET-VALUE-12345" });
+  const { dir } = withSecretsFile({ apiKey: "SUPER-SECRET-VALUE-12345" }); // secretscan:allow (public constant/test vector)
   const m = JSON.parse(manifest({ hosts: ["api.example.com"], secrets: { apiKey: "x" } }));
   const secretsFile = join(dir, ".kino-secrets.json");
   const tape = join(dir, "tape.json");
@@ -2079,7 +2079,7 @@ test("kino.crypto: an opened value comes back redacted even from an unrelated la
   const { kino } = sealedKino({ hmacKey: "hm4c-k3y" });
   const m = kino.secret("hmacKey");
   kino.crypto.hmac("sha256", m, "x"); // opens hmacKey
-  const plainKeyHex = "2b7e151628aed2a6abf7158809cf4f3c";
+  const plainKeyHex = "2b7e151628aed2a6abf7158809cf4f3c"; // secretscan:allow (public constant/test vector)
   const ct = kino.crypto.encrypt("aes-128-ecb", { key: plainKeyHex, keyEncoding: "hex", data: "hm4c-k3y" });
   const out = kino.crypto.decrypt("aes-128-ecb", { key: plainKeyHex, keyEncoding: "hex", data: ct });
   assert.equal(out, m);
@@ -2090,7 +2090,7 @@ test("kino.crypto: an opened value comes back redacted even from an unrelated la
 // request set, a server echoing it to a request that carried no marker).
 test("redaction covers a declared value this runtime never used: a crypto answer", () => {
   const { kino } = sealedKino({ hmacKey: "hm4c-k3y" });
-  const plainKeyHex = "2b7e151628aed2a6abf7158809cf4f3c";
+  const plainKeyHex = "2b7e151628aed2a6abf7158809cf4f3c"; // secretscan:allow (public constant/test vector)
   const ct = kino.crypto.encrypt("aes-128-ecb", { key: plainKeyHex, keyEncoding: "hex", data: "hm4c-k3y" });
   assert.equal(kino.crypto.decrypt("aes-128-ecb", { key: plainKeyHex, keyEncoding: "hex", data: ct }), kino.secret("hmacKey"));
 });
@@ -2318,7 +2318,7 @@ test("the kit's M3U reader drops hidden and refused entries during the parse, ne
 const DRM_NONE = { drmKeyId: "", drmKey: "", drmLicenseUrl: "", drmLicenseHeaders: {} };
 const drmOf = (e) => ({ drmKeyId: e.drmKeyId, drmKey: e.drmKey, drmLicenseUrl: e.drmLicenseUrl, drmLicenseHeaders: e.drmLicenseHeaders });
 const KID = "0123456789abcdef0123456789abcdef";
-const KEY = "fedcba9876543210fedcba9876543210";
+const KEY = "fedcba9876543210fedcba9876543210"; // secretscan:allow (public constant/test vector)
 
 test("the kit's M3U reader decodes UTF-16 lists, with a BOM or without one, like their UTF-8 text", () => {
   const sample = "#EXTM3U\n#EXTINF:-1 group-title=\"Noticias\",Señal Ñ\nhttps://live.example.com/n.m3u8\n";

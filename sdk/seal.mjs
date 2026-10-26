@@ -29,7 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { contract } from "./contract.mjs";
 
 /** Kino's v1 production public key (spec §3); the private half lives only in the app's native library. */
-export const PRODUCTION_PUBLIC_KEY_HEX = "b13ecf6d231a75bf57ca21d977075c74f914b4416653cf89940897a29393e65c";
+export const PRODUCTION_PUBLIC_KEY_HEX = "b13ecf6d231a75bf57ca21d977075c74f914b4416653cf89940897a29393e65c"; // secretscan:allow (public constant/test vector)
 
 // The fixed 12-byte ASN.1 SubjectPublicKeyInfo prefix for a raw 32-byte X25519 point (RFC 8410).
 const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
