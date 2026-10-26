@@ -688,7 +688,10 @@ function embedTag(html) {
   const tag = decodeEntities(m[1]);
   const src = (/\ssrc="([^"]+)"/.exec(tag) || [])[1];
   const pass = (/\sdata-pass="([^"]+)"/.exec(tag) || [])[1];
-  return src && pass ? { src: siteUrl(src), pass: siteUrl(pass) } : null;
+  // CineHax deja dm-api.invalid en el HTML y su JavaScript lo sustituye antes de cargar el iframe.
+  // Kino no ejecuta ese JavaScript al leer la fachada, así que se normaliza al origen real permitido.
+  const playerSrc = String(src || "").replace(/https?:\/\/dm-api\.invalid\b/i, "https://api-encrypted.moviemaster.lat");
+  return playerSrc && pass ? { src: siteUrl(playerSrc), pass: siteUrl(pass) } : null;
 }
 
 /** El host de una URL (el reproductor está en otro dominio que el sitio). */
