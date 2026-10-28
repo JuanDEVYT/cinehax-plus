@@ -1,7 +1,7 @@
 {
   "id": "cinehax-plus",
   "name": "CineHax+",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "apiVersion": 6,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -84,6 +84,6 @@
   ],
   "signature": {
     "authorKey": "f9e9967038ad5b85443c1c990f4f053df85012583cdeb63d097eac19a0e78cea",
-    "value": "ffd1ba24b289042b9557a7ba6e1d33ef8824f1307b770e83650a508bb47af5a46ee545b58a3c571a1321bd52b542b6370ca2f50e2108593a735bd7863185ed05"
+    "value": "bc812d40587ba724c124b0b8e324b117e3091ed2bc3093ddee175a40c18b2fc8337e5bb0e95f046f77aa25f7c1cb78ad27abd3f26b7762b7f359d161c5d0050d"
   }
 }

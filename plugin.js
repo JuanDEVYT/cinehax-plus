@@ -746,11 +746,26 @@ function soloAnuncios(direcciones) {
   return true;
 }
 
+// Los anuncios VOD de los servidores de CineHax son listas terminadas de segundos/minutos,
+// mientras que películas y episodios superan ampliamente ese total. No se aplica a listas en vivo
+// ni a manifiestos sin ENDLIST para evitar descartar contenido cuya duración se desconoce.
+function duracionPublicidad(lista) {
+  if (lista.indexOf("#EXT-X-ENDLIST") < 0) return false;
+  let total = 0;
+  let tramos = 0;
+  const re = /#EXTINF:([\d.]+)/g;
+  let m;
+  while ((m = re.exec(lista)) !== null) {
+    total += Number(m[1]) || 0;
+    tramos += 1;
+  }
+  return tramos >= 2 && total > 0 && total <= 180;
+}
+
 /**
- * ¿La lista HLS trae vídeo de verdad? Hoy los servidores "directo" devuelven manifiestos cuyos
- * fragmentos son imágenes de anuncios (tiktokcdn) y los "proxy" traen el vídeo: el reproductor del
- * sitio lo comprueba al reproducir y salta al siguiente servidor. Aquí se mira antes de devolver
- * el enlace. Sin respuesta (fuera del kit o red caída) se confía y Kino lo intenta reproducir.
+ * ¿La lista HLS trae vídeo de verdad? Se descartan listas que solo apuntan a anuncios y VODs muy
+ * cortos ya terminados (publicidad). Los servidores siguientes se prueban antes de devolver un
+ * stream a Kino. Sin respuesta se confía en la fuente, para no romper una reproducción por red lenta.
  */
 async function listaSana(url, opciones) {
   try {
@@ -759,13 +774,13 @@ async function listaSana(url, opciones) {
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") < 0) return false;
     const urls = txt.split("\n").filter((l) => l && l.charAt(0) !== "#");
-    if (txt.indexOf("#EXTINF") >= 0) return !soloAnuncios(urls); // ya es la de medios
+    if (txt.indexOf("#EXTINF") >= 0) return !soloAnuncios(urls) && !duracionPublicidad(txt);
     if (!urls[0]) return false;
     const v = await kino.fetch(new URL(urls[0], url).href, opciones);
     if (!v.ok) return false;
     const vt = await v.text();
     if (vt.indexOf("#EXTM3U") < 0) return false;
-    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#"));
+    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#")) && !duracionPublicidad(vt);
   } catch { return true; }
 }
 

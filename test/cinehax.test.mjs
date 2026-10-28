@@ -66,8 +66,11 @@ globalThis.kino = {
       const embed = /embed=([^&]+)/.exec(path);
       const id = embed ? decodeURIComponent(embed[1]) : "";
       if (id === "s-iframe-1") return asJson({ type: "iframe", url: "https://embed-b.example/e/xyz" });
+      if (id === "s-direct-1") return asJson({ type: "hls", url: "https://api-encrypted.moviemaster.lat/p/ad-hls" });
       return asJson({ type: "hls", url: "https://api-encrypted.moviemaster.lat/p/test-hls" });
     }
+    if (path === "/p/ad-hls") return asJson("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:15,\nad-a.ts\n#EXTINF:15,\nad-b.ts\n#EXT-X-ENDLIST\n");
+    if (path === "/p/test-hls") return asJson("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\nvideo-a.ts\n#EXTINF:10,\nvideo-b.ts\n#EXTINF:10,\nvideo-c.ts\n#EXTINF:10,\nvideo-d.ts\n#EXTINF:10,\nvideo-e.ts\n#EXTINF:10,\nvideo-f.ts\n#EXTINF:10,\nvideo-g.ts\n#EXTINF:10,\nvideo-h.ts\n#EXTINF:10,\nvideo-i.ts\n#EXTINF:10,\nvideo-j.ts\n#EXTINF:10,\nvideo-k.ts\n#EXTINF:10,\nvideo-l.ts\n#EXTINF:10,\nvideo-m.ts\n#EXTINF:10,\nvideo-n.ts\n#EXTINF:10,\nvideo-o.ts\n#EXTINF:10,\nvideo-p.ts\n#EXTINF:10,\nvideo-q.ts\n#EXTINF:10,\nvideo-r.ts\n#EXTINF:10,\nvideo-s.ts\n#EXT-X-ENDLIST\n");
     return { ok: false, status: 404, text: async () => "" };
   },
   error: kinoError,
@@ -205,11 +208,13 @@ test("resolve: el enlace sale de la API del reproductor, sin browser ni anuncios
   // el pass lo sirve el sitio y el embed lo recibe con su credencial
   assert.ok(fetched.some((p) => p.startsWith("/api/player-pass?t=movie:1400837")), "pide el pass al sitio");
   assert.ok(fetched.some((p) => p.startsWith("/embed/movie/1400837") && p.includes("pass=v1.test-pass")), "el embed recibe el pass");
-  // el servidor que solo sabe abrirse en su propia página se salta
+  // El iframe se salta y el primer HLS es una publicidad VOD de 30 s: se prueba el proxy.
   const videos = fetched.filter((p) => p.startsWith("/video?"));
-  assert.equal(videos.length, 2, "salta el iframe y usa el directo");
+  assert.equal(videos.length, 3, "salta iframe y publicidad antes de usar el siguiente servidor");
   assert.ok(videos[0].includes("embed=s-iframe-1"));
   assert.ok(videos[1].includes("embed=s-direct-1"));
+  assert.ok(videos[2].includes("embed=s-proxy-1"));
+  assert.ok(fetched.includes("/p/ad-hls"), "analiza la duración de la lista publicitaria");
 });
 
 test("resolve: una ref de serie abre el primer episodio de la temporada 1", async () => {
