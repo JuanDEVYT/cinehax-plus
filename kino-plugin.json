@@ -1,7 +1,8 @@
 {
   "id": "cinehax-plus",
   "name": "CineHax+",
-  "version": "0.3.5",
+  "creator": "JuandreXter",
+  "version": "0.3.6",
   "apiVersion": 6,
   "entry": "plugin.js",
   "icon": "icon.png",
