@@ -2,7 +2,7 @@
   "id": "cinehax-plus",
   "name": "CineHax+",
   "creator": "JuandreXter",
-  "version": "0.3.8",
+  "version": "0.4.0",
   "apiVersion": 20,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -35,8 +35,23 @@
     "browse",
     "episodes",
     "resolve",
-    "download"
+    "download",
+    "screen"
   ],
+  "screen": {
+    "label": "CineHax+",
+    "labelEn": "CineHax+",
+    "icon": "movie",
+    "menuOpens": "screen",
+    "opensFrom": [
+      "menu",
+      "settings"
+    ],
+    "settingsButton": {
+      "label": "Abrir CineHax+",
+      "labelEn": "Open CineHax+"
+    }
+  },
   "section": {
     "label": "CineHax+"
   },
@@ -98,6 +113,6 @@
   ],
   "signature": {
     "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
-    "value": "ec73ae95ebf9ec7a958289997692d0e751567f8a8aea3942d19689826813f8cf2c154992184adb0c0f0f472b2c5a53afa74d099a1c914991dc6ec1a654c20e0e"
+    "value": "957a70a1c880eb2bca24ca7408493b0073553098190bf4a2537e436d1ea222460f7c046510aa7cf86fcbbe807e19ed7aefd52d94c2d216b274c63bd345526104"
   }
 }

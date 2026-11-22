@@ -85,6 +85,7 @@ globalThis.kino = {
   }),
   browser: Object.freeze({
     capture: async () => { browserCalls += 1; throw kinoError("browser_unavailable", "sin navegador en el kit"); },
+    page: async () => { browserCalls += 1; throw kinoError("browser_unavailable", "sin navegador en el kit"); },
   }),
 };
 

@@ -803,6 +803,13 @@ function soloAnuncios(direcciones) {
   return true;
 }
 
+// Señales frecuentes de manifiestos de pre-roll/mid-roll. Se descartan aunque
+// el anuncio se sirva desde el mismo CDN del contenido, sin depender del host.
+function manifiestoConPublicidad(lista) {
+  const txt = String(lista || "");
+  return /#EXT-X-DATERANGE:[^\n]*(CLASS|SCTE35|ad-|advert|preroll|midroll)|#EXT-X-CUE-(OUT|IN)|#EXT-OATCLS-SCTE35|#EXT-X-SPLICEPOINT-SCTE35/i.test(txt);
+}
+
 // Los anuncios VOD de los servidores de CineHax son listas terminadas de segundos/minutos,
 // mientras que películas y episodios superan ampliamente ese total. No se aplica a listas en vivo
 // ni a manifiestos sin ENDLIST para evitar descartar contenido cuya duración se desconoce.
@@ -831,13 +838,16 @@ async function listaSana(url, opciones) {
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") < 0) return false;
     const urls = txt.split("\n").filter((l) => l && l.charAt(0) !== "#");
-    if (txt.indexOf("#EXTINF") >= 0) return !soloAnuncios(urls) && !duracionPublicidad(txt);
+    if (txt.indexOf("#EXTINF") >= 0) {
+      return !soloAnuncios(urls) && !duracionPublicidad(txt) && !manifiestoConPublicidad(txt);
+    }
     if (!urls[0]) return false;
     const v = await kino.fetch(new URL(urls[0], url).href, opciones);
     if (!v.ok) return false;
     const vt = await v.text();
     if (vt.indexOf("#EXTM3U") < 0) return false;
-    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#")) && !duracionPublicidad(vt);
+    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#")) &&
+      !duracionPublicidad(vt) && !manifiestoConPublicidad(vt);
   } catch { return true; }
 }
 
@@ -974,9 +984,14 @@ export async function resolve(ref) {
   const stream = await flujoPlayer(watchUrl);
   if (stream) return stream;
 
-  // Último recurso: el browser oculto de Kino monta la página y captura el vídeo que pide.
-  kino.log.report("resolve_fallback", "sin enlace directo del reproductor, se usa el browser");
-  const captured = await kino.browser.capture(watchUrl, { timeoutMs: 20000, autoplay: true });
+  // Último recurso: cargar el iframe, no la página del catálogo. La página principal
+  // puede exponer el tráiler en og:video (como Hermosa Justicia) antes del player real.
+  // browser.page ejecuta el reproductor incrustado y permite seleccionar media real.
+  const pageHtml = await getText(watchUrl);
+  const fallbackEmbed = embedTag(pageHtml);
+  const fallbackUrl = fallbackEmbed ? fallbackEmbed.src : watchUrl;
+  kino.log.report("resolve_fallback", "sin enlace directo del reproductor, se abre el iframe del player");
+  const captured = await kino.browser.page(fallbackUrl, { timeoutMs: 30000, autoplay: true });
 
   if (!captured.media || !captured.media.length) {
     throw kino.error("not_found", "no se encontró video en la página", { userMessage: "No se encontró el video de este título." });
@@ -1042,4 +1057,90 @@ export async function validateSettings(values) {
     return { pestanas: "Elige una opción de la lista" };
   }
   return null;
+}
+
+// ──────────────────────────────────────────────────────────────
+// SCREEN — catálogo nativo CineHax+
+// ──────────────────────────────────────────────────────────────
+const SCREEN_PAGE_SIZE = 36;
+
+function screenListRef(tab) {
+  return encodeRef({ list: tab === "series" ? "series" : "peliculas" });
+}
+
+export async function screen(arg) {
+  const state = (arg && arg.state) || {};
+  const device = (arg && arg.device) || "phone";
+  const tab = state.tab === "series" ? "series" : "peliculas";
+  const query = typeof state.query === "string" ? state.query.trim() : "";
+  const page = Math.max(1, Number(state.page) || 1);
+  let items = [];
+  let next = null;
+  let message = "";
+
+  try {
+    if (query) {
+      const result = await search(query);
+      items = (result && result.items) || [];
+    } else {
+      const result = await browse(screenListRef(tab), String(page));
+      items = (result && result.items) || [];
+      next = result && result.next;
+    }
+  } catch (err) {
+    message = "No se pudo cargar el catálogo. Inténtalo de nuevo.";
+    try { kino.log("screen catálogo: " + ((err && err.message) || err)); } catch (_) {}
+  }
+
+  const columns = device === "tv" ? 6 : device === "desktop" ? 5 : 3;
+  const visible = items.slice(0, SCREEN_PAGE_SIZE);
+  const controls = {
+    type: "row", key: "catalog-controls", gap: 8,
+    children: [
+      { type: "dropdown", key: "catalog-tab", labelText: "Catálogo", value: tab,
+        options: [{ value: "peliculas", label: "Películas" }, { value: "series", label: "Series" }],
+        onChanged: { event: "setTab" } },
+      { type: "textInput", key: "catalog-search", value: query, placeholder: "Buscar películas y series...", icon: "search", onChanged: { event: "search" } },
+    ],
+  };
+
+  const body = [controls];
+  if (message) {
+    body.push({ type: "emptyState", key: "catalog-error", icon: "error", title: "Catálogo no disponible", message });
+  } else if (!visible.length) {
+    body.push({ type: "emptyState", key: "catalog-empty", icon: "search_off", title: "Sin resultados", message: query ? `No hay títulos para “${query}”` : "No hay títulos disponibles ahora." });
+  } else {
+    body.push({ type: "titleGrid", key: `catalog-${tab}-${page}-${query || "all"}`, columns: { compact: 3, expanded: columns }, items: visible });
+    const nav = [];
+    if (!query && page > 1) nav.push({ type: "button", key: "previous", label: "« Anteriores", variant: "secondary", onTap: { event: "setPage", arg: String(page - 1) } });
+    if (!query) nav.push({ type: "text", key: "page-label", text: `Página ${page}`, variant: "caption", align: "center" });
+    if (!query && next) nav.push({ type: "button", key: "next", label: "Siguientes »", variant: "primary", onTap: { event: "setPage", arg: String(page + 1) } });
+    if (nav.length) body.push({ type: "row", key: "catalog-pagination", gap: 12, padding: { y: 8 }, children: nav });
+  }
+
+  return {
+    type: "scaffold", key: "cinehax-screen",
+    appBar: {
+      type: "appBar", key: "cinehax-appbar", title: "CineHax+", mergeWithKinoBar: true,
+      leading: { type: "button", key: "cinehax-close", icon: "arrow_back", label: "Cerrar", labelEn: "Close", variant: "icon", onTap: { go: { close: true } } },
+    },
+    body: { type: "scroll", key: "cinehax-scroll", children: [{ type: "col", key: "cinehax-body", gap: 12, padding: { x: 16, y: 12 }, children: body }] },
+  };
+}
+
+export async function screenEvent(ev) {
+  const event = ev || {};
+  const state = Object.assign({ tab: "peliculas", query: "", page: 1 }, event.state || {});
+  if (event.name === "setTab") {
+    state.tab = (event.value || event.arg) === "series" ? "series" : "peliculas";
+    state.query = "";
+    state.page = 1;
+  } else if (event.name === "search") {
+    state.query = typeof event.value === "string" ? event.value : (typeof event.arg === "string" ? event.arg : "");
+    state.page = 1;
+  } else if (event.name === "setPage") {
+    const n = Number(event.arg !== undefined ? event.arg : event.value);
+    if (Number.isInteger(n) && n >= 1) state.page = n;
+  }
+  return { state };
 }
