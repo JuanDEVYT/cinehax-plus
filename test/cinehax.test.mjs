@@ -346,3 +346,25 @@ test("validateSettings: el ajuste de pestañas solo admite sus opciones", async 
   assert.equal(await plugin.validateSettings({}), null);
   assert.deepEqual(await plugin.validateSettings({ pestanas: "x" }), { pestanas: "Elige una opción de la lista" });
 });
+
+test("decodeRef: soporta URLs directas, IDs de tarjeta y slugs", async () => {
+  // URLs completas y relativas
+  const epFromUrl = await plugin.episodes("https://cinehaxplus.com/serie/el-mentalista");
+  assert.equal(epFromUrl.series.title, "El Mentalista");
+
+  const epFromDot = await plugin.episodes("serie.el-mentalista");
+  assert.equal(epFromDot.series.title, "El Mentalista");
+
+  // Browse con ID de lista y URL de lista
+  const b1 = await plugin.browse("lista-nuevas");
+  assert.ok(b1.items.length > 0);
+
+  const b2 = await plugin.browse("https://cinehaxplus.com/peliculas");
+  assert.ok(b2.items.length > 0);
+
+  // Resolve con URL directa
+  store.clear();
+  fetched.length = 0;
+  const resFromUrl = await plugin.resolve("https://cinehaxplus.com/pelicula/madre-siniestra-2026");
+  assert.equal(resFromUrl.url, "https://api-encrypted.moviemaster.lat/p/test-hls");
+});

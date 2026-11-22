@@ -35,7 +35,63 @@ function encodeRef(data) {
 }
 
 function decodeRef(ref) {
-  try { return JSON.parse(ref); } catch { return null; }
+  if (typeof ref === "object" && ref !== null) return ref;
+  if (typeof ref !== "string") return null;
+  const s = ref.trim();
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch (_) {}
+
+  const epMatch = s.match(/(?:serie|series)\/([^/#?]+)\/temporada\/(\d+)\/episodio\/(\d+)/i);
+  if (epMatch) {
+    return {
+      type: "episodio",
+      slug: epMatch[1],
+      season: parseInt(epMatch[2], 10),
+      episode: parseInt(epMatch[3], 10),
+    };
+  }
+
+  const itemMatch = s.match(/\/(pelicula|serie)\/([^/#?]+)/i);
+  if (itemMatch) {
+    return { type: itemMatch[1].toLowerCase(), slug: itemMatch[2] };
+  }
+
+  const dotMatch = s.match(/^(pelicula|serie)\.([^/#?]+)$/i);
+  if (dotMatch) {
+    return { type: dotMatch[1].toLowerCase(), slug: dotMatch[2] };
+  }
+
+  const genMatch = s.match(/(?:\/genero\/|^genero-)([^/#?]+)/i);
+  if (genMatch) {
+    return { genero: genMatch[1].toLowerCase() };
+  }
+
+  if (/\/peliculas\/?$/i.test(s) || s === "peliculas") return { list: "peliculas" };
+  if (/\/series\/?$/i.test(s) || s === "series") return { list: "series" };
+  if (["rating", "popular", "trending", "series-rating", "series-popular", "series-trending"].includes(s)) {
+    return { list: s };
+  }
+  if (s.startsWith("lista-")) {
+    const map = {
+      "lista-nuevas": "peliculas",
+      "lista-trending": "trending",
+      "lista-popular": "popular",
+      "lista-valoradas": "rating",
+      "lista-series-nuevas": "series",
+      "lista-series-trending": "series-trending",
+      "lista-series-popular": "series-popular",
+      "lista-series-valoradas": "series-rating",
+    };
+    if (map[s]) return { list: map[s] };
+  }
+
+  if (/^[a-z0-9-]+$/i.test(s)) {
+    return { type: "pelicula", slug: s };
+  }
+
+  return null;
 }
 
 /** El año del slug (termina en -YYYY), como texto. */
@@ -734,7 +790,8 @@ function ordenaServidores(lista, lang) {
 /** fetch que no lanza y devuelve JSON ya parseado. */
 async function getJson(url, options) {
   try {
-    const r = await kino.fetch(url, options);
+    const opts = { timeoutMs: 6000, ...(options || {}) };
+    const r = await kino.fetch(url, opts);
     return r.ok ? JSON.parse(await r.text()) : null;
   } catch { return null; }
 }
@@ -788,6 +845,59 @@ async function listaSana(url, opciones) {
 // y lo reproduce, o el servidor responde 403.
 const UA = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Safari/537.36";
 
+function formatLang(lang) {
+  const l = String(lang || "").toUpperCase();
+  if (l.includes("LAT")) return "🇲🇽 Latino";
+  if (l.includes("CAST") || l.includes("ESP")) return "🇪🇸 Castellano";
+  if (l.includes("SUB")) return "🇺🇸 Subtitulado";
+  return lang || "Audio";
+}
+
+async function verificaServidor(s, origin, params, ui, pide) {
+  try {
+    const v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, pide);
+    if (!v) return null;
+
+    if (v.url && v.type !== "iframe") {
+      if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, pide))) {
+        kino.log(`flujo: lista sin vídeo en ${s.name || s.id.slice(0, 8)}, se salta`);
+        return null;
+      }
+      return {
+        url: v.url,
+        mime: v.type === "hls" ? "application/x-mpegURL" : (v.type === "dash" ? "application/dash+xml" : (v.type === "mp4" ? "video/mp4" : undefined)),
+        headers: { "User-Agent": UA, Referer: `${origin}/` },
+        serverName: s.name || s.host || "Servidor",
+        lang: s.lang || "",
+      };
+    }
+
+    const targetUrl = v.url || s.url;
+    if (targetUrl && (v.type === "iframe" || /^https?:\/\//i.test(targetUrl))) {
+      if (typeof kino !== "undefined" && kino.plugins && typeof kino.plugins.call === "function") {
+        try {
+          const res = await kino.plugins.call("resolver", "resolve", { url: targetUrl, referer: `${origin}/` });
+          if (res && Array.isArray(res.streams) && res.streams.length > 0) {
+            const st = res.streams[0];
+            const hdrs = { "User-Agent": UA, Referer: st.referer || `${origin}/` };
+            if (Array.isArray(st.headers)) {
+              for (const h of st.headers) if (h && h.name) hdrs[h.name] = String(h.value);
+            }
+            return {
+              url: st.url,
+              mime: st.kind === "hls" ? "application/x-mpegURL" : (st.kind === "mp4" ? "video/mp4" : "application/x-mpegURL"),
+              headers: hdrs,
+              serverName: st.server || s.name || "Kino Resolver",
+              lang: s.lang || "",
+            };
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 /**
  * El vídeo no está en la página: la web solo deja una fachada con espera, y el reproductor incrustado
  * pide el enlace a su propia API con dos credenciales que ella misma sirve (pass del sitio + ui suyo).
@@ -824,21 +934,15 @@ async function flujoPlayer(watchUrl) {
   const orden = ordenaServidores(lista, emb.lang);
   for (let i = 0; i < orden.length && i < 10; i += 1) {
     const s = orden[i];
-    const v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, pide);
-    // type "iframe" es un servidor que solo sabe abrirse en su propia página: Kino no puede reproducirlo.
-    if (!v || !v.url || v.type === "iframe") continue;
-    // Un manifiesto que solo trae anuncios no sirve: se pasa al siguiente servidor, como hace el sitio.
-    if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, pide))) {
-      kino.log(`flujo: lista sin vídeo en ${s.name || s.id.slice(0, 8)}, se salta`);
-      continue;
+    const res = await verificaServidor(s, origin, params, ui, pide);
+    if (res) {
+      kino.log(`flujo: resuelto con ${res.serverName} en ${Date.now() - t0} ms`);
+      return {
+        url: res.url,
+        headers: res.headers,
+        mime: res.mime,
+      };
     }
-    kino.log(`flujo: ${v.type} vía ${s.name || s.host || "servidor"} en ${Date.now() - t0} ms`);
-    return {
-      url: v.url,
-      // El reproductor de Kino manda estas cabeceras en el manifiest y en cada fragmento.
-      headers: { "User-Agent": UA, Referer: `${origin}/` },
-      mime: v.type === "hls" ? "application/x-mpegURL" : v.type === "dash" ? "application/dash+xml" : v.type === "mp4" ? "video/mp4" : undefined,
-    };
   }
   return null;
 }

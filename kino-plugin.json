@@ -2,12 +2,25 @@
   "id": "cinehax-plus",
   "name": "CineHax+",
   "creator": "JuandreXter",
-  "version": "0.3.7",
-  "apiVersion": 6,
+  "version": "0.3.8",
+  "apiVersion": 20,
   "entry": "plugin.js",
   "icon": "icon.png",
   "description": "Creado por JuandreXter - Películas y series en español latino de CineHax+",
   "homepage": "https://cinehaxplus.com",
+  "consumes": {
+    "resolver": {
+      "repo": "xuper-plugin/kino-plugin-kino-resolver",
+      "door": "resolver",
+      "calls": [
+        "resolve",
+        "normalizeHost"
+      ]
+    }
+  },
+  "recommends": [
+    "xuper-plugin/kino-plugin-kino-resolver"
+  ],
   "hosts": [
     "cinehaxplus.com",
     "*.cinehaxplus.com",
@@ -84,7 +97,7 @@
     }
   ],
   "signature": {
-    "authorKey": "f9e9967038ad5b85443c1c990f4f053df85012583cdeb63d097eac19a0e78cea",
-    "value": "d05973fee8850b26f9184f85e9145edcc07de5dd71fd7c2a78bcfb395900e95886c831b2a034e98bf6a5ae3b7c311b8d86cc4ee51674f290b504fd6004ef7a00"
+    "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
+    "value": "ec73ae95ebf9ec7a958289997692d0e751567f8a8aea3942d19689826813f8cf2c154992184adb0c0f0f472b2c5a53afa74d099a1c914991dc6ec1a654c20e0e"
   }
 }
