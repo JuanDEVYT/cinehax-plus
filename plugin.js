@@ -1234,7 +1234,8 @@ async function flujoPlayer(watchUrl, opts = {}) {
       reproductor,
     };
   }
-  return { vacio: true, pendiente: reproductor.pendiente, reproductor, orden, pidioMotor };
+  // Había servidores, pero ninguno dio un manifiesto vivo: el sitio tiene el título, no una copia.
+  return { vacio: true, sinCopia: true, pendiente: reproductor.pendiente, reproductor, orden, pidioMotor };
 }
 
 /** El navegador oculto: último recurso, solo si Kino lo permite y queda tiempo. Nunca `media[0]` a ciegas. */
@@ -1355,7 +1356,9 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
   if (r && r.stream) kino.log(`flujo: manifiesto muerto en ${r.stream.label || "la copia"}, se descarta`);
 
   // 3) El sitio dice que no tiene nada (`pendiente: false`): no tiene sentido gastar 20 s de navegador.
-  if (r && r.vacio && !r.pendiente) throw noDisponible(data);
+  // Lista de servidores vacía de verdad: el sitio no tiene el título. Si había servidores y todos
+  // fallaron, aún queda el navegador oculto antes de rendirse.
+  if (r && r.vacio && !r.pendiente && !r.sinCopia) throw noDisponible(data);
 
   // 4) El sitio avisa de que aún lo está preparando: el navegador tampoco va a encontrar nada.
   if (r && r.pendiente) {
@@ -1370,6 +1373,11 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
     if (stream) return stream;
   }
 
+  if (r && r.sinCopia) {
+    throw kino.error("unavailable", "los servidores del sitio no dan un manifiesto vivo", {
+      userMessage: "Ninguna copia de este título se puede reproducir ahora. Inténtalo más tarde.",
+    });
+  }
   throw kino.error("not_found", "sin copia reproducible", {
     userMessage: r && r.pidioMotor
       ? "Instala el motor de reproducción compartido desde el menú de plugins y vuelve a intentar."

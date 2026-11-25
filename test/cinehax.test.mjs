@@ -239,7 +239,7 @@ test("resolve: la ref mala es not_found y una página sin reproductor cae al bro
   // Sin reproductor en la página se intenta el navegador; si tampoco hay, se responde algo que la persona entiende.
   await assert.rejects(plugin.resolve(JSON.stringify({ type: "pelicula", slug: "no-existe-2020" })), (e) => {
     assert.equal(e.code, "not_found");
-    assert.match(e.userMessage || "", /No se encontró una copia|no está disponible/);
+    assert.match(e.userMessage || "", /Ninguna copia|No se encontró una copia|no está disponible/);
     return true;
   });
   assert.ok(browserCalls >= 1, "sin enlace directo se intenta kino.browser");
@@ -532,7 +532,7 @@ test("un enlace guardado que ya da 404 no se sirve al reproductor", async () => 
   hlsMuerto = true;   // el token del CDN caducó: ahora 404
   try {
     await assert.rejects(() => plugin.resolve(ref), (e) => {
-      assert.match(String(e.userMessage || ""), /No se encontró una copia|no está disponible/);
+      assert.match(String(e.userMessage || ""), /Ninguna copia|No se encontró una copia|no está disponible/);
       return true;
     }, "no se entrega un enlace muerto a Kino");
     assert.equal(store.has("ok:pelicula:madre-siniestra-2026::"), false, "la caché muerta se borra");
@@ -546,7 +546,7 @@ test("un manifiesto 404 no se entrega a Kino", async () => {
   hlsMuerto = true;
   try {
     await assert.rejects(() => plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" })), (e) => {
-      assert.match(String(e.userMessage || ""), /No se encontró una copia|no está disponible/);
+      assert.match(String(e.userMessage || ""), /Ninguna copia|No se encontró una copia|no está disponible/);
       return true;
     });
   } finally {
