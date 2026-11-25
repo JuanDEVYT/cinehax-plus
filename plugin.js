@@ -870,7 +870,9 @@ function duracionPublicidad(lista) {
 async function listaSana(url, opciones) {
   try {
     const r = await kino.fetch(url, opciones);
-    if (!r.ok) return true;
+    // Un 4xx (404, 410) es un enlace muerto: no se puede servir. Un 5xx o un fallo de red sí se
+    // perdonan, que el CDN puede estar teniendo un mal minuto.
+    if (!r.ok) return Number(r.status) >= 500;
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") < 0) return false;
     const urls = txt.split("\n").filter((l) => l && l.charAt(0) !== "#");
@@ -1132,6 +1134,17 @@ function guardarBueno(clave, stream) {
 }
 
 /**
+ * ¿El manifiesto sigue vivo? Un 404 que Kino descubre en el reproductor cuesta 10 s de espera y un
+ * reintento por cada copia: mejor saberlo aquí, antes de entregarlo.
+ */
+const esManifiestoUrl = (url) => /\.(m3u8|mpd)(\?|$)/i.test(String(url || ""));
+async function manifiestoVivo(url, headers, hasta) {
+  if (!esManifiestoUrl(url)) return true;
+  if (restante(hasta) < 3000) return true;   // sin tiempo: se confía en la fuente
+  return listaSana(url, { headers: headers || {}, timeoutMs: Math.max(1500, Math.min(5000, restante(hasta) - 1500)) });
+}
+
+/**
  * Abre el reproductor incrustado: la fachada de la página, el pass del sitio, su PM_UI y la lista de
  * servidores. Devuelve null si el sitio no deja ni eso.
  */
@@ -1267,7 +1280,7 @@ async function capturaDelReproductor(watchUrl, hasta) {
 async function resuelveAlternativa(alt) {
   const hasta = Date.now() + (kino.browser ? 30000 : 16000);
   const r = await flujoPlayer(alt.w, { hasta, preferidoIdx: alt.x });
-  if (!r || !r.stream) {
+  if (!r || !r.stream || !(await manifiestoVivo(r.stream.url, r.stream.headers, hasta))) {
     throw kino.error("not_found", "la copia no abrió", {
       userMessage: "Esa copia no está disponible ahora. Prueba con otra.",
     });
@@ -1317,23 +1330,29 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
   const bueno = leerBueno(clave);
   if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} })) {
     kino.log(`flujo: enlace guardado de ${slug}`);
+    // Las copias ya resueltas caducan con su token: del enlace guardado solo viajan las diferidas,
+    // que se resuelven al elegirlas y llegan con token fresco.
+    const copias = (Array.isArray(bueno.alternatives) ? bueno.alternatives : []).filter((a) => a && typeof a.ref === "string");
     return {
       url: bueno.url,
       headers: bueno.headers || {},
       mime: bueno.mime,
       ...(bueno.label ? { label: bueno.label } : {}),
-      ...(Array.isArray(bueno.alternatives) && bueno.alternatives.length ? { alternatives: bueno.alternatives } : {}),
+      ...(copias.length ? { alternatives: copias.slice(0, MAX_ALTERNATIVAS) } : {}),
     };
   }
+  // El enlace guardado murió (404): se borra para no volver a servirlo en la siguiente llamada.
+  if (bueno) { try { kino.storage.remove(clave); } catch (_) { /* sin caché */ } }
 
   // 2) El reproductor incrustado, con su parte del presupuesto (y el resto para el navegador si hay).
   const fase = conNavegador ? Math.min(10000, hasta - Date.now() - 8000) : limite - 2000;
   const r = await flujoPlayer(watchUrl, { hasta: Math.min(hasta, Date.now() + Math.max(4000, fase)) });
-  if (r && r.stream) {
+  if (r && r.stream && await manifiestoVivo(r.stream.url, r.stream.headers, hasta)) {
     const salida = conAlternativas(r.stream, r.orden, r.servidor, watchUrl, r.reproductor.lista);
     guardarBueno(clave, salida);
     return salida;
   }
+  if (r && r.stream) kino.log(`flujo: manifiesto muerto en ${r.stream.label || "la copia"}, se descarta`);
 
   // 3) El sitio dice que no tiene nada (`pendiente: false`): no tiene sentido gastar 20 s de navegador.
   if (r && r.vacio && !r.pendiente) throw noDisponible(data);

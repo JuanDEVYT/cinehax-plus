@@ -43,6 +43,7 @@ const PAGES = {
 let fetched = [];
 let config = { pestanas: "ambas" };
 let serversBody = read("servers.json");
+let hlsMuerto = false;   // el CDN empieza a contestar 404 (token caducado)
 let browserCalls = 0;
 let videoUa = null;
 const store = new Map();
@@ -71,6 +72,7 @@ globalThis.kino = {
       return asJson({ type: "hls", url: "https://api-encrypted.moviemaster.lat/p/test-hls" });
     }
     if (path === "/p/ad-hls") return asJson("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:15,\nad-a.ts\n#EXTINF:15,\nad-b.ts\n#EXT-X-ENDLIST\n");
+    if (path === "/p/test-hls" && hlsMuerto) return { ok: false, status: 404, text: async () => "" };
     if (path === "/p/test-hls") return asJson("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\nvideo-a.ts\n#EXTINF:10,\nvideo-b.ts\n#EXTINF:10,\nvideo-c.ts\n#EXTINF:10,\nvideo-d.ts\n#EXTINF:10,\nvideo-e.ts\n#EXTINF:10,\nvideo-f.ts\n#EXTINF:10,\nvideo-g.ts\n#EXTINF:10,\nvideo-h.ts\n#EXTINF:10,\nvideo-i.ts\n#EXTINF:10,\nvideo-j.ts\n#EXTINF:10,\nvideo-k.ts\n#EXTINF:10,\nvideo-l.ts\n#EXTINF:10,\nvideo-m.ts\n#EXTINF:10,\nvideo-n.ts\n#EXTINF:10,\nvideo-o.ts\n#EXTINF:10,\nvideo-p.ts\n#EXTINF:10,\nvideo-q.ts\n#EXTINF:10,\nvideo-r.ts\n#EXTINF:10,\nvideo-s.ts\n#EXT-X-ENDLIST\n");
     return { ok: false, status: 404, text: async () => "" };
   },
@@ -518,6 +520,38 @@ test("pantalla: la búsqueda pinta la rejilla con lo que devuelve el sitio", asy
   const ev = await plugin.screenEvent({ name: "search", value: "avatar", state: { query: "" } });
   assert.equal(ev.state.query, "avatar");
   assert.ok(ev.ui.some((op) => op.close === "buscar"), "la hoja se cierra al buscar");
+});
+
+test("un enlace guardado que ya da 404 no se sirve al reproductor", async () => {
+  const ref = JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" });
+  store.clear();
+  hlsMuerto = false;
+  const uno = await plugin.resolve(ref);
+  assert.ok(uno.url, "el primero resuelve");
+
+  hlsMuerto = true;   // el token del CDN caducó: ahora 404
+  try {
+    await assert.rejects(() => plugin.resolve(ref), (e) => {
+      assert.match(String(e.userMessage || ""), /No se encontró una copia|no está disponible/);
+      return true;
+    }, "no se entrega un enlace muerto a Kino");
+    assert.equal(store.has("ok:pelicula:madre-siniestra-2026::"), false, "la caché muerta se borra");
+  } finally {
+    hlsMuerto = false;
+  }
+});
+
+test("un manifiesto 404 no se entrega a Kino", async () => {
+  store.clear();
+  hlsMuerto = true;
+  try {
+    await assert.rejects(() => plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" })), (e) => {
+      assert.match(String(e.userMessage || ""), /No se encontró una copia|no está disponible/);
+      return true;
+    });
+  } finally {
+    hlsMuerto = false;
+  }
 });
 
 test("decodeRef: soporta URLs directas, IDs de tarjeta y slugs", async () => {
