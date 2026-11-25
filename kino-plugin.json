@@ -2,7 +2,7 @@
   "id": "cinehax-plus",
   "name": "CineHax+",
   "creator": "JuandreXter",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "apiVersion": 20,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -28,7 +28,7 @@
     "api-encrypted.moviemaster.lat"
   ],
   "streamHosts": "any",
-  "browser": true,
+  "browser": "pages",
   "telemetry": true,
   "capabilities": [
     "search",
@@ -143,6 +143,6 @@
   ],
   "signature": {
     "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
-    "value": "9c63d9b30fef3d667f54a3231ebf71dd187e27c062925f8a8cab194f69c2489e34197146256459d50ff3a48d236bb1aee16566ba9d37fa9b1c828c30fa19ac03"
+    "value": "d31ba78b4a2d31619bfed81bbf79db7fbc25cd03b986fb8e6eb196d44ad4e00f0da0efe06afaeb0c20a056519591ab9b1ba0d048a2250b3c58ab60dcb32b2d03"
   }
 }

@@ -862,31 +862,85 @@ function duracionPublicidad(lista) {
   return tramos >= 2 && total > 0 && total <= 180;
 }
 
+function nombreArchivo(url) {
+  try {
+    const pathname = new URL(String(url || "")).pathname;
+    const partes = pathname.split("/").filter(Boolean);
+    return partes.length ? decodeURIComponent(partes[partes.length - 1]) : null;
+  } catch (_) { return null; }
+}
+
+function resumenM3U(lista) {
+  const text = String(lista || "");
+  let duracion = 0;
+  let segmentos = 0;
+  for (const m of text.matchAll(/#EXTINF:([0-9.]+)/g)) { duracion += Number(m[1]) || 0; segmentos += 1; }
+  const urls = text.split(/\r?\n/).filter((x) => x && x.charAt(0) !== "#");
+  return { bytes: text.length, segmentos, duracionSegundos: Math.round(duracion * 100) / 100, primeraUrl: urls[0] || null, marcadoresPublicidad: manifiestoConPublicidad(text), parecePublicidadCorta: duracionPublicidad(text) };
+}
+
+function diagnostico(evento, datos) {
+  const data = Object.assign({ plugin: "cinehax-plus", at: new Date().toISOString() }, datos || {});
+  try { kino.log.report(`cinehax_${evento}`, JSON.stringify(data)); } catch (_) { /* optional telemetry */ }
+  try { kino.log(`[CineHax diagnóstico] ${evento} ${JSON.stringify(data)}`); } catch (_) { /* log unavailable */ }
+}
+
+function tituloDiagnostico(data) {
+  return data && data.type === "episodio" ? `${data.slug} · T${data.season}E${data.episode}` : String((data && data.slug) || "desconocido");
+}
+
 /**
  * ¿La lista HLS trae vídeo de verdad? Se descartan listas que solo apuntan a anuncios y VODs muy
  * cortos ya terminados (publicidad). Los servidores siguientes se prueban antes de devolver un
  * stream a Kino. Sin respuesta se confía en la fuente, para no romper una reproducción por red lenta.
  */
-async function listaSana(url, opciones) {
+async function listaSana(url, opciones, contexto) {
+  const startedAt = Date.now();
+  const meta = Object.assign({ manifestUrl: url, manifestFile: nombreArchivo(url) }, contexto || {});
   try {
     const r = await kino.fetch(url, opciones);
-    // Un 4xx (404, 410) es un enlace muerto: no se puede servir. Un 5xx o un fallo de red sí se
-    // perdonan, que el CDN puede estar teniendo un mal minuto.
-    if (!r.ok) return Number(r.status) >= 500;
+    // Un 4xx es un enlace muerto. Un fallo temporal se registra y se deja a Kino intentar reproducir.
+    if (!r.ok) {
+      const aceptado = Number(r.status) >= 500;
+      diagnostico("manifest_http", Object.assign(meta, { status: r.status, accepted: aceptado, elapsedMs: Date.now() - startedAt }));
+      return aceptado;
+    }
     const txt = await r.text();
-    if (txt.indexOf("#EXTM3U") < 0) return false;
+    if (txt.indexOf("#EXTM3U") < 0) {
+      diagnostico("manifest_invalid", Object.assign(meta, { elapsedMs: Date.now() - startedAt, preview: txt.slice(0, 160) }));
+      return false;
+    }
+    const master = resumenM3U(txt);
     const urls = txt.split("\n").filter((l) => l && l.charAt(0) !== "#");
     if (txt.indexOf("#EXTINF") >= 0) {
-      return !soloAnuncios(urls) && !duracionPublicidad(txt) && !manifiestoConPublicidad(txt);
+      const reason = soloAnuncios(urls) ? "ad_host" : master.parecePublicidadCorta ? "short_ad_playlist" : master.marcadoresPublicidad ? "hls_ad_marker" : null;
+      diagnostico(reason ? "manifest_rejected" : "manifest_accepted", Object.assign(meta, master, { reason, elapsedMs: Date.now() - startedAt }));
+      return !reason;
     }
-    if (!urls[0]) return false;
-    const v = await kino.fetch(new URL(urls[0], url).href, opciones);
-    if (!v.ok) return false;
+    if (!urls[0]) {
+      diagnostico("manifest_rejected", Object.assign(meta, master, { reason: "master_without_variants", elapsedMs: Date.now() - startedAt }));
+      return false;
+    }
+    const variantUrl = new URL(urls[0], url).href;
+    const v = await kino.fetch(variantUrl, opciones);
+    if (!v.ok) {
+      const aceptado = Number(v.status) >= 500;
+      diagnostico("variant_http", Object.assign(meta, master, { variantUrl, variantFile: nombreArchivo(variantUrl), status: v.status, accepted: aceptado, elapsedMs: Date.now() - startedAt }));
+      return aceptado;
+    }
     const vt = await v.text();
-    if (vt.indexOf("#EXTM3U") < 0) return false;
-    return !soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#")) &&
-      !duracionPublicidad(vt) && !manifiestoConPublicidad(vt);
-  } catch { return true; }
+    if (vt.indexOf("#EXTM3U") < 0) {
+      diagnostico("variant_invalid", Object.assign(meta, { variantUrl, variantFile: nombreArchivo(variantUrl), elapsedMs: Date.now() - startedAt, preview: vt.slice(0, 160) }));
+      return false;
+    }
+    const variant = resumenM3U(vt);
+    const reason = soloAnuncios(vt.split("\n").filter((l) => l && l.charAt(0) !== "#")) ? "ad_host" : variant.parecePublicidadCorta ? "short_ad_playlist" : variant.marcadoresPublicidad ? "hls_ad_marker" : null;
+    diagnostico(reason ? "variant_rejected" : "manifest_accepted", Object.assign(meta, master, variant, { variantUrl, variantFile: nombreArchivo(variantUrl), reason, elapsedMs: Date.now() - startedAt }));
+    return !reason;
+  } catch (err) {
+    diagnostico("manifest_exception", Object.assign(meta, { elapsedMs: Date.now() - startedAt, error: String((err && err.message) || err) }));
+    return true;
+  }
 }
 
 // Los enlaces del reproductor van atados al User-Agent que los pidió: el mismo abre el stream
@@ -970,16 +1024,19 @@ function pareceAnuncio(url) {
  * listaSana; si ninguno pasa, el primero que no venga de un CDN de anuncios. Nunca `media[0]` a ciegas,
  * que en estos reproductores es el pre-roll.
  */
-async function mejorMedia(media) {
+async function mejorMedia(media, contexto) {
   const lista = (Array.isArray(media) ? media : []).filter((m) => m && typeof m.url === "string" && m.url);
   const limpios = lista.filter((m) => !pareceAnuncio(m.url));
   const pool = limpios.length ? limpios : lista;
   const manifiestos = pool.filter((m) =>
     m.mime === "application/x-mpegURL" || m.mime === "application/dash+xml" || /\.(m3u8|mpd)(\?|$)/i.test(m.url));
+  diagnostico("browser_media_candidates", Object.assign({ mediaCount: lista.length, cleanMediaCount: pool.length, manifestCount: manifiestos.length, media: lista.slice(0, 8).map((m) => ({ url: m.url, file: nombreArchivo(m.url), mime: m.mime || null, adHost: pareceAnuncio(m.url) })) }, contexto || {}));
   for (const m of manifiestos.slice(0, 3)) {
-    if (await listaSana(m.url, { headers: m.headers || {} })) return m;
+    if (await listaSana(m.url, { headers: m.headers || {} }, contexto)) return m;
   }
-  return manifiestos[0] || pool[0] || null;
+  const chosen = manifiestos[0] || pool[0] || null;
+  if (chosen) diagnostico("browser_media_fallback", Object.assign({ selectedUrl: chosen.url, selectedFile: nombreArchivo(chosen.url), selectedMime: chosen.mime || null }, contexto || {}));
+  return chosen;
 }
 
 function formatLang(lang) {
@@ -990,23 +1047,31 @@ function formatLang(lang) {
   return lang || "Audio";
 }
 
-async function verificaServidor(s, origin, params, ui, pide, hasta) {
+async function verificaServidor(s, origin, params, ui, pide, hasta, contexto) {
   const referer = `${origin}/`;
+  const startedAt = Date.now();
+  const serverName = s.name || s.host || String(s.id || "Servidor");
+  const meta = Object.assign({ serverName, serverId: s.id || null, serverLang: s.lang || null }, contexto || {});
   // Cada intento tiene su propio reloj: ni una petición puede comerse la llamada entera.
   const peticion = { ...pide, timeoutMs: Math.max(1200, Math.min(6000, restante(hasta || Date.now() + ATTEMPT_MS))) };
+  const apiUrl = `${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`;
   let v = null;
-  try {
-    v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, peticion);
-  } catch (_) { v = null; }
+  try { v = await getJson(apiUrl, peticion); } catch (_) { v = null; }
+  if (!v) diagnostico("server_empty_response", Object.assign(meta, { apiUrl, elapsedMs: Date.now() - startedAt }));
 
   // 1) El reproductor ya da el enlace: es lo más rápido y no pasa por ningún hoster.
   if (v && v.url && v.type !== "iframe") {
-    if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, peticion))) {
-      kino.log(`flujo: lista sin vídeo en ${s.name || String(s.id).slice(0, 8)}, se salta`);
+    diagnostico("server_stream_candidate", Object.assign(meta, { apiUrl, streamUrl: v.url, streamFile: nombreArchivo(v.url), streamType: v.type || null, elapsedMs: Date.now() - startedAt }));
+    if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, peticion, meta))) {
+      diagnostico("server_stream_rejected", Object.assign(meta, { streamUrl: v.url, streamType: v.type, elapsedMs: Date.now() - startedAt }));
       return null;
     }
     // Un mp4 no se puede medir sin descargarlo, pero al menos no puede venir de un CDN de anuncios.
-    if (v.type === "mp4" && pareceAnuncio(v.url)) return null;
+    if (v.type === "mp4" && pareceAnuncio(v.url)) {
+      diagnostico("server_stream_rejected", Object.assign(meta, { streamUrl: v.url, streamType: v.type, reason: "ad_host", elapsedMs: Date.now() - startedAt }));
+      return null;
+    }
+    diagnostico("server_stream_accepted", Object.assign(meta, { streamUrl: v.url, streamFile: nombreArchivo(v.url), streamType: v.type || null, elapsedMs: Date.now() - startedAt }));
     return {
       url: v.url,
       mime: v.type === "hls" ? "application/x-mpegURL" : (v.type === "dash" ? "application/dash+xml" : (v.type === "mp4" ? "video/mp4" : undefined)),
@@ -1195,9 +1260,15 @@ async function abreReproductor(watchUrl) {
 async function flujoPlayer(watchUrl, opts = {}) {
   const t0 = Date.now();
   const hasta = opts.hasta || Date.now() + RESOLVE_MS;
+  const context = Object.assign({ watchUrl }, opts.contexto || {});
+  diagnostico("resolve_started", context);
   const reproductor = await abreReproductor(watchUrl);
-  if (!reproductor) return null;
+  if (!reproductor) {
+    diagnostico("player_open_failed", Object.assign(context, { elapsedMs: Date.now() - t0 }));
+    return null;
+  }
   if (!reproductor.lista.length) {
+    diagnostico("servers_empty", Object.assign(context, { pending: reproductor.pendiente, elapsedMs: Date.now() - t0 }));
     return { vacio: true, pendiente: reproductor.pendiente, reproductor };
   }
 
@@ -1211,15 +1282,19 @@ async function flujoPlayer(watchUrl, opts = {}) {
   orden = await ordenaConResolver(orden);
 
   const limite = Math.min(orden.length, MAX_SERVIDORES);
+  diagnostico("servers_received", Object.assign(context, { serverCount: reproductor.lista.length, attempts: limite, servers: orden.slice(0, limite).map((s) => ({ id: s.id || null, name: s.name || s.host || null, lang: s.lang || null })) }));
   let pidioMotor = false; // hubo un hoster que solo el motor compartido podía abrir
+  // Los candidatos independientes se abren a la vez para no sumar timeouts de cada CDN.
+  // La primera copia sana en el orden de preferencia es la que se devuelve.
   for (let i = 0; i < limite; i += 1) {
     if (restante(hasta) < 1200) break; // sin tiempo para otro intento: mejor responder ya
     const s = orden[i];
-    const res = await verificaServidor(s, reproductor.origin, reproductor.params, reproductor.ui, reproductor.pide, hasta);
+    const res = await verificaServidor(s, reproductor.origin, reproductor.params, reproductor.ui, reproductor.pide, hasta, Object.assign(context, { attempt: i + 1, totalAttempts: limite }));
     if (!res) {
       if (s.url && !puertaDisponible()) pidioMotor = true;
       continue;
     }
+    diagnostico("resolve_success", Object.assign(context, { serverName: res.serverName, streamUrl: res.url, streamFile: nombreArchivo(res.url), mime: res.mime || null, elapsedMs: Date.now() - t0 }));
     kino.log(`flujo: ${res.serverName} en ${Date.now() - t0} ms`);
     return {
       stream: {
@@ -1235,14 +1310,18 @@ async function flujoPlayer(watchUrl, opts = {}) {
     };
   }
   // Había servidores, pero ninguno dio un manifiesto vivo: el sitio tiene el título, no una copia.
+  diagnostico("all_servers_failed", Object.assign(context, { attempts: limite, elapsedMs: Date.now() - t0 }));
   return { vacio: true, sinCopia: true, pendiente: reproductor.pendiente, reproductor, orden, pidioMotor };
 }
 
 /** El navegador oculto: último recurso, solo si Kino lo permite y queda tiempo. Nunca `media[0]` a ciegas. */
-async function capturaDelReproductor(watchUrl, hasta) {
+async function capturaDelReproductor(watchUrl, hasta, contexto) {
+  const context = Object.assign({ watchUrl }, contexto || {});
+  const startedAt = Date.now();
   const page = await getText(watchUrl, { timeoutMs: 6000 });
   const embed = embedTag(page);
   const url = embed ? embed.src : watchUrl;
+  diagnostico("browser_fallback_started", Object.assign(context, { playerUrl: url, playerFile: nombreArchivo(url), hasEmbed: !!embed }));
   const origin = originOf(url);
   const referer = origin ? `${origin}/` : `${BASE}/`;
   let captured = null;
@@ -1253,21 +1332,25 @@ async function capturaDelReproductor(watchUrl, hasta) {
         timeoutMs: Math.min(18000, Math.max(6000, restante(hasta) - 2500)),
         headers: { Referer: referer },
       });
-    } catch (_) { captured = null; }
+    } catch (err) { diagnostico("browser_capture_error", Object.assign(context, { playerUrl: url, error: String((err && err.message) || err) })); captured = null; }
   }
   if ((!captured || !captured.media || !captured.media.length) &&
       kino.browser && typeof kino.browser.page === "function" && restante(hasta) > 8000) {
     try {
       captured = await kino.browser.page(url, { timeoutMs: Math.min(20000, restante(hasta) - 2000), autoplay: true });
-    } catch (_) { captured = null; }
+    } catch (err) { diagnostico("browser_page_error", Object.assign(context, { playerUrl: url, error: String((err && err.message) || err) })); captured = null; }
   }
 
-  const best = await mejorMedia(captured && captured.media);
-  if (!best) return null;
+  const best = await mejorMedia(captured && captured.media, context);
+  if (!best) {
+    diagnostico("browser_no_media", Object.assign(context, { playerUrl: url, mediaCount: Array.isArray(captured && captured.media) ? captured.media.length : 0, elapsedMs: Date.now() - startedAt }));
+    return null;
+  }
   const subtitles = (Array.isArray(captured && captured.subtitles) ? captured.subtitles : [])
     .filter((s) => s && typeof s.url === "string" && s.url)
     .slice(0, 30)
     .map((s) => ({ url: s.url, lang: (typeof s.lang === "string" && s.lang) || "und" }));
+  diagnostico("browser_media_selected", Object.assign(context, { selectedUrl: best.url, selectedFile: nombreArchivo(best.url), selectedMime: best.mime || null, elapsedMs: Date.now() - startedAt }));
   return {
     url: best.url,
     headers: best.headers || {},
@@ -1307,6 +1390,7 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
   if (typeof data.slug !== "string" || !data.slug) throw kino.error("not_found", "ref inválido");
 
   const slug = data.slug;
+  const contexto = { title: tituloDiagnostico(data), contentType: data.type, slug, season: data.season || null, episode: data.episode || null };
   const conNavegador = permitirNavegador && !!(kino && kino.browser && (kino.browser.capture || kino.browser.page));
   const limite = limiteMs || (conNavegador ? RESOLVE_BROWSER_MS : RESOLVE_MS);
   const hasta = Date.now() + limite;
@@ -1329,7 +1413,7 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
   // 1) El enlace que ya funcionó para este título (30 min): una lista que aún responde se usa tal cual.
   const clave = `ok:${data.type}:${slug}:${data.season || ""}:${data.episode || ""}`;
   const bueno = leerBueno(clave);
-  if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} })) {
+  if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} }, Object.assign(contexto, { source: "cache" }))) {
     kino.log(`flujo: enlace guardado de ${slug}`);
     // Las copias ya resueltas caducan con su token: del enlace guardado solo viajan las diferidas,
     // que se resuelven al elegirlas y llegan con token fresco.
@@ -1347,7 +1431,7 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
 
   // 2) El reproductor incrustado, con su parte del presupuesto (y el resto para el navegador si hay).
   const fase = conNavegador ? Math.min(10000, hasta - Date.now() - 8000) : limite - 2000;
-  const r = await flujoPlayer(watchUrl, { hasta: Math.min(hasta, Date.now() + Math.max(4000, fase)) });
+  const r = await flujoPlayer(watchUrl, { hasta: Math.min(hasta, Date.now() + Math.max(4000, fase)), contexto: Object.assign(contexto, { watchUrl }) });
   if (r && r.stream && await manifiestoVivo(r.stream.url, r.stream.headers, hasta)) {
     const salida = conAlternativas(r.stream, r.orden, r.servidor, watchUrl, r.reproductor.lista);
     guardarBueno(clave, salida);
@@ -1369,7 +1453,7 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
 
   // 5) Navegador oculto, solo con tiempo de sobra.
   if (conNavegador && restante(hasta) > 8000) {
-    const stream = await capturaDelReproductor(watchUrl, hasta);
+    const stream = await capturaDelReproductor(watchUrl, hasta, Object.assign(contexto, { watchUrl }));
     if (stream) return stream;
   }
 
@@ -1520,11 +1604,12 @@ const navTabs = (active) => ({
   tabs: NAV.map((n) => ({ value: n.key, label: n.es, labelEn: n.en })),
 });
 
+const CINEHAX_LOGO = "https://cinehaxplus.com/content/uploads/2026/10/ea578e8cfbe34369-400.png";
+
 const brand = () => ({
   type: "Row", key: "brand", gap: 8, crossAxisAlignment: "center",
   children: [
-    { type: "Icon", key: "brandIcon", name: "movie", color: "primary", size: 22 },
-    { type: "Text", key: "brandText", text: "CineHax+", textEn: "CineHax+", style: "h4" },
+    { type: "Image", key: "brandLogo", url: CINEHAX_LOGO, aspect: "3:1", fit: "contain", h: 40, alt: "CineHax+", altEn: "CineHax+", fallback: { type: "Text", text: "CineHax+", style: "h4" } },
   ],
 });
 
