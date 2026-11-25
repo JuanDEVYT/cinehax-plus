@@ -42,6 +42,7 @@ const PAGES = {
 
 let fetched = [];
 let config = { pestanas: "ambas" };
+let serversBody = read("servers.json");
 let browserCalls = 0;
 let videoUa = null;
 const store = new Map();
@@ -60,7 +61,7 @@ globalThis.kino = {
     if (path.startsWith("/api/player-pass")) return asJson({ ok: true, pass: "v1.test-pass", ttl: 600 });
     if (path.startsWith("/embed/movie/1400837")) return asJson(read("embed-movie.html"));
     if (path.startsWith("/embed/tv/5920")) return asJson(read("embed-tv.html"));
-    if (path.startsWith("/servers?")) return asJson(read("servers.json"));
+    if (path.startsWith("/servers?")) return asJson(serversBody);
     if (path.startsWith("/video?")) {
       videoUa = options && options.headers && options.headers["User-Agent"];
       const embed = /embed=([^&]+)/.exec(path);
@@ -230,9 +231,15 @@ test("resolve: una ref de serie abre el primer episodio de la temporada 1", asyn
 });
 
 test("resolve: la ref mala es not_found y una página sin reproductor cae al browser", async () => {
+  store.clear();
   browserCalls = 0;
   await assert.rejects(plugin.resolve("no es json"), (e) => e.code === "not_found");
-  await assert.rejects(plugin.resolve(JSON.stringify({ type: "pelicula", slug: "no-existe-2020" })), (e) => e.code === "browser_unavailable");
+  // Sin reproductor en la página se intenta el navegador; si tampoco hay, se responde algo que la persona entiende.
+  await assert.rejects(plugin.resolve(JSON.stringify({ type: "pelicula", slug: "no-existe-2020" })), (e) => {
+    assert.equal(e.code, "not_found");
+    assert.match(e.userMessage || "", /No se encontró una copia|no está disponible/);
+    return true;
+  });
   assert.ok(browserCalls >= 1, "sin enlace directo se intenta kino.browser");
 });
 
@@ -327,12 +334,12 @@ test("categories: tiles con ref válida, y un tile abre browse", async () => {
 test("settings: el estado, la comprobación y la caché", async () => {
   store.clear();
   config = { pestanas: "ambas" };
-  assert.deepEqual(await plugin.settingsStatus(), { estado: "Sin comprobación todavía" });
+  assert.match((await plugin.settingsStatus()).estado, /^Sin comprobación todavía/);
 
   const checked = await plugin.action("comprobar");
   assert.equal(checked.refresh, true);
   assert.match(checked.message, /responde/);
-  assert.equal((await plugin.settingsStatus()).estado, "cinehaxplus.com respondió en la última comprobación");
+  assert.match((await plugin.settingsStatus()).estado, /^cinehaxplus\.com respondió en la última comprobación/);
 
   await plugin.search({ ...itemQuery(), q: "avatar" });
   assert.ok(store.has("buscar:avatar"), "quedó la caché de la búsqueda");
@@ -342,10 +349,140 @@ test("settings: el estado, la comprobación y la caché", async () => {
   assert.equal(await plugin.action("otra"), null);
 });
 
-test("validateSettings: el ajuste de pestañas solo admite sus opciones", async () => {
+test("validateSettings: pestañas e idioma solo admiten sus opciones", async () => {
   assert.equal(await plugin.validateSettings({ pestanas: "series" }), null);
   assert.equal(await plugin.validateSettings({}), null);
   assert.deepEqual(await plugin.validateSettings({ pestanas: "x" }), { pestanas: "Elige una opción de la lista" });
+  assert.equal(await plugin.validateSettings({ idioma: "lat" }), null);
+  assert.deepEqual(await plugin.validateSettings({ idioma: "klingon" }), { idioma: "Elige una opción de la lista" });
+});
+
+test("resolve: deja las demás copias como alternativas diferidas", async () => {
+  store.clear();
+  fetched.length = 0;
+  browserCalls = 0;
+  serversBody = read("servers.json");
+  const out = await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.ok(Array.isArray(out.alternatives) && out.alternatives.length >= 1, "hay copias en el menú Servidor");
+  assert.match(out.label, /Latino/);
+  for (const a of out.alternatives) {
+    assert.ok(a.ref.startsWith("alt:") && a.ref.length <= 512, "la ref cabe en lo que Kino acepta");
+    assert.ok(a.label.length <= 48);
+  }
+  let reproducibles = 0;
+  for (const a of out.alternatives) {
+    try { const r = await plugin.resolve(a.ref); if (/test-hls$/.test(r.url)) reproducibles += 1; } catch (_) { /* copia muerta */ }
+  }
+  assert.ok(reproducibles >= 1, "alguna alternativa se abre de verdad");
+});
+
+test("resolve: si el sitio no tiene el título, lo dice y no abre el navegador", async () => {
+  store.clear();
+  fetched.length = 0;
+  browserCalls = 0;
+  serversBody = { meta: { title: "Nada" }, pendiente: false, servers: [] };
+  try {
+    await assert.rejects(
+      plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" })),
+      (e) => e.code === "not_found" && /no está disponible en CineHax\+/.test(e.userMessage || ""),
+    );
+  } finally { serversBody = read("servers.json"); }
+  assert.equal(browserCalls, 0, "no se gasta el navegador en un título que el sitio no tiene");
+});
+
+test("resolve: un título en preparación lo dice sin abrir el navegador", async () => {
+  store.clear();
+  browserCalls = 0;
+  serversBody = { meta: { title: "Pronto" }, pendiente: true, servers: [] };
+  try {
+    await assert.rejects(
+      plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" })),
+      (e) => e.code === "unavailable" && /preparando/.test(e.userMessage || ""),
+    );
+  } finally { serversBody = read("servers.json"); }
+  assert.equal(browserCalls, 0);
+});
+
+test("resolve: el enlace que funcionó se reutiliza media hora", async () => {
+  store.clear();
+  fetched.length = 0;
+  const one = await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.ok(store.has("ok:pelicula:madre-siniestra-2026::"), "el enlace bueno queda guardado");
+
+  fetched.length = 0;
+  const two = await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.equal(two.url, one.url);
+  assert.ok(Array.isArray(two.alternatives) && two.alternatives.length >= 1, "las copias siguen en el enlace guardado");
+  assert.equal(fetched.filter((p) => p.startsWith("/servers?")).length, 0, "no vuelve a pedir servidores");
+  assert.equal(fetched.filter((p) => p.startsWith("/video?")).length, 0, "no vuelve a probar servidores");
+  assert.ok(fetched.includes("/p/test-hls"), "solo comprueba que la lista sigue viva");
+});
+
+test("prepare: calienta el enlace sin gastar el navegador", async () => {
+  store.clear();
+  fetched.length = 0;
+  browserCalls = 0;
+  await plugin.prepare(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.ok(store.has("ok:pelicula:madre-siniestra-2026::"), "deja el enlace listo");
+  assert.equal(browserCalls, 0);
+  fetched.length = 0;
+  await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+  assert.equal(fetched.filter((p) => p.startsWith("/video?")).length, 0, "la reproducción ya no prueba nada");
+});
+
+test("ajuste idioma: la copia del idioma pedido se prueba primero", async () => {
+  store.clear();
+  fetched.length = 0;
+  config = { pestanas: "ambas", idioma: "cast" };
+  try {
+    const out = await plugin.resolve(JSON.stringify({ type: "pelicula", slug: "madre-siniestra-2026" }));
+    assert.equal(out.url, "https://api-encrypted.moviemaster.lat/p/test-hls");
+    const videos = fetched.filter((p) => p.startsWith("/video?"));
+    assert.ok(videos.length >= 1 && videos[0].includes("embed=s-direct-esp"), "el castellano va delante");
+  } finally {
+    config = { pestanas: "ambas" };
+  }
+});
+
+test("panel: enseña la copia y las preferencias sin tocar la reproducción", async () => {
+  config = { pestanas: "ambas", idioma: "lat" };
+  try {
+    const p = await plugin.panel({
+      kind: "episode", title: "El Mentalista", season: 1, episode: 2,
+      playing: { label: "Latino · Servidor 1", lang: "Latino", quality: "1080p", server: "Servidor 1" },
+      positionMs: 65000, durationMs: 3600000, tab: "copia",
+    });
+    assert.equal(p.format, "screen");
+    assert.equal(p.tab, "copia");
+    assert.deepEqual(p.tabs.map((t) => t.id), ["copia", "ajustes"]);
+    const copia = JSON.stringify(p.root);
+    assert.match(copia, /El Mentalista · T1 E2/);
+    assert.match(copia, /1080p/);
+    assert.match(copia, /1:05 de 60:00/);
+
+    const prefs = await plugin.panel({ tab: "ajustes", playing: {} });
+    assert.equal(prefs.tab, "ajustes");
+    assert.match(JSON.stringify(prefs.root), /Idioma preferido: Latino/);
+  } finally {
+    config = { pestanas: "ambas" };
+  }
+});
+
+test("pantalla: sin el motor compartido ofrece instalarlo", async () => {
+  const sinMotor = await plugin.screen({ installed: { "xuper-plugin/kino-plugin-kino-resolver": false }, state: {}, device: "phone" });
+  assert.equal(sinMotor.key, "cinehax-instalar");
+  assert.ok(JSON.stringify(sinMotor).includes("installPlugin"), "el botón instala el motor");
+
+  const conMotor = await plugin.screen({ installed: { "xuper-plugin/kino-plugin-kino-resolver": true }, state: {}, device: "phone" });
+  assert.equal(conMotor.key, "cinehax-screen");
+});
+
+test("pantalla: la búsqueda pinta la rejilla con lo que devuelve el sitio", async () => {
+  const scr = await plugin.screen({ state: { query: "avatar" }, device: "phone" });
+  const col = scr.body.children[0];
+  const grid = col.children.find((c) => c.type === "titleGrid");
+  assert.ok(grid && grid.items.length > 0, "la búsqueda de la pantalla ya no sale vacía");
+  assert.ok(!col.children.some((c) => c.type === "emptyState"));
 });
 
 test("decodeRef: soporta URLs directas, IDs de tarjeta y slugs", async () => {

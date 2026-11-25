@@ -38,6 +38,8 @@ function decodeRef(ref) {
   if (typeof ref === "object" && ref !== null) return ref;
   if (typeof ref !== "string") return null;
   const s = ref.trim();
+  const alt = decodeAlt(s);
+  if (alt) return { alt };
   try {
     const parsed = JSON.parse(s);
     if (parsed && typeof parsed === "object") return parsed;
@@ -144,9 +146,10 @@ function ldOf(html, types) {
 }
 
 /** fetch que no lanza: null cuando el sitio no contesta bien. Nunca registra lo que la persona escribió. */
-async function getText(path) {
+async function getText(path, opts) {
   try {
-    const r = await kino.fetch(siteUrl(path));
+    // Un timeout propio: sin él, un fetch colgado se come el presupuesto entero de la llamada.
+    const r = await kino.fetch(siteUrl(path), { timeoutMs: 9000, ...(opts || {}) });
     return r.ok ? r.text() : null;
   } catch (e) {
     kino.log("cinehax: fetch fallido", e && e.code ? e.code : "network");
@@ -165,11 +168,12 @@ function cacheGet(key) {
   } catch { return null; }
 }
 
-function cacheSet(key, value) {
+function cacheSet(key, value, ttlMs) {
   try {
     const raw = JSON.stringify(value);
-    // La caché del plugin pesa 256 KB en total: una serie grande entra, una lista de series no.
-    if (raw && raw.length < 60000) kino.storage.set(key, raw, { ttlMs: CACHE_MS });
+    // La caché del plugin pesa 256 KB en total: lo que no entra se queda sin caché, pero se avisa.
+    if (raw && raw.length < 60000) kino.storage.set(key, raw, { ttlMs: ttlMs || CACHE_MS });
+    else if (raw) kino.log(`cache: ${key.slice(0, 24)} no entra (${raw.length} bytes)`);
   } catch { /* llena o no disponible: se sigue sin caché */ }
 }
 
@@ -702,24 +706,37 @@ export async function episodes(ref) {
   const { slug } = data;
   if (!slug) throw kino.error("not_found", "ref sin slug");
 
-  // Reabrir una serie cuesta tantas peticiones como temporadas tenga: se guarda la respuesta entera.
-  const cached = cacheGet(`serie:${slug}`);
-  if (cached && Array.isArray(cached.episodes) && cached.episodes.length) return cached;
-
+  // Cada temporada se guarda por separado: una serie de 100 capítulos no cabe en una sola entrada de
+  // caché, y volver a abrirla solo pide las temporadas que aún no están guardadas.
   const serieHtml = await getText(`${BASE}/serie/${slug}`);
   if (!serieHtml) throw kino.error("unavailable", "serie no disponible", { userMessage: "Esta serie no está disponible ahora." });
 
-  let seasons = seasonNumbers(serieHtml);
+  const seasons = seasonNumbers(serieHtml);
   if (!seasons.length) throw kino.error("not_found", "sin temporadas", { userMessage: "Esta serie no tiene episodios disponibles." });
 
   const all = [];
   let missing = 0;
   for (let i = 0; i < seasons.length; i += 6) { // 6 peticiones a la vez, el máximo de Kino
-    const chunk = seasons.slice(i, i + 6);
-    const pages = await Promise.all(chunk.map((n) => getText(`${BASE}/serie/${slug}/temporada/${n}`)));
-    for (let j = 0; j < chunk.length; j++) {
-      if (!pages[j]) { missing++; continue; }
-      all.push(...parseEpisodes(pages[j], slug));
+    const trozo = seasons.slice(i, i + 6);
+    const porPedir = [];
+    for (const n of trozo) {
+      const guardada = cacheGet(`temporada:${slug}:${n}`);
+      // Una lista vacía guardada también cuenta: es una temporada que el sitio no tiene.
+      if (Array.isArray(guardada)) { all.push(...guardada); continue; }
+      porPedir.push(n);
+    }
+    if (!porPedir.length) continue;
+    const pages = await Promise.all(porPedir.map((n) => getText(`${BASE}/serie/${slug}/temporada/${n}`)));
+    for (let j = 0; j < porPedir.length; j++) {
+      if (!pages[j]) {
+        missing++;
+        // Una temporada sin página se recuerda una hora: no se vuelve a pedir en cada apertura de la serie.
+        cacheSet(`temporada:${slug}:${porPedir[j]}`, [], 3600 * 1000);
+        continue;
+      }
+      const eps = parseEpisodes(pages[j], slug);
+      cacheSet(`temporada:${slug}:${porPedir[j]}`, eps);
+      all.push(...eps);
     }
     if (all.length >= 5000) break;
   }
@@ -728,9 +745,23 @@ export async function episodes(ref) {
 
   if (!all.length) throw kino.error("not_found", "sin episodios", { userMessage: "Esta serie no tiene episodios disponibles." });
 
-  const out = { series: seriesInfo(serieHtml, slug), episodes: all.slice(0, 5000) };
-  cacheSet(`serie:${slug}`, out);
-  return out;
+  return { series: seriesInfo(serieHtml, slug), episodes: all.slice(0, 5000) };
+}
+
+/**
+ * Kino 0.9.88 llama a prepare(ref) mientras la persona lee la ficha, para calentar resolve(). Aquí se
+ * deja el enlace bueno en la caché. Es una llamada de fondo (sin navegador) y nunca puede lanzar.
+ */
+export async function prepare(ref) {
+  await null;
+  try {
+    const data = decodeRef(ref);
+    if (!data || data.alt || data.type === "serie" || !data.slug) return;
+    const clave = `ok:${data.type}:${data.slug}:${data.season || ""}:${data.episode || ""}`;
+    if (leerBueno(clave)) return;
+    // Sin navegador: preparar es una llamada de fondo y no puede abrir el reproductor oculto.
+    await resuelve(ref, false, 9000); // un tope propio: preparar es opcional y no debe tardar como una reproducción
+  } catch (_) { /* preparar nunca puede estorbar una reproducción */ }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -777,9 +808,14 @@ function embFromSrc(src) {
   return emb;
 }
 
-/** Los servidores en el mismo orden en que el reproductor los arranca: directos antes que proxys, buen idioma primero. */
-function ordenaServidores(lista, lang) {
-  const peso = (s) => (lang && s.lang === lang ? 0 : 1);
+/** Los servidores en el mismo orden en que el reproductor los arranca: el idioma pedido primero, luego directos antes que proxys. */
+function ordenaServidores(lista, lang, prefiere) {
+  const peso = (s) => {
+    const propio = String(s.lang || "").toUpperCase();
+    if (prefiere && propio.includes(prefiere)) return 0;
+    if (lang && s.lang === lang) return 1;
+    return 2;
+  };
   return lista.slice().sort((a, b) =>
     peso(a) - peso(b) ||
     ((a.mode === "proxy") - (b.mode === "proxy")) ||
@@ -855,6 +891,95 @@ async function listaSana(url, opciones) {
 // y lo reproduce, o el servidor responde 403.
 const UA = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Safari/537.36";
 
+// ── Kino Resolver: el motor compartido de hosters (xuper-plugin/kino-plugin-kino-resolver) ──
+// El plugin deja de adivinar cada hoster: le pasa el embed a la puerta de Kino y traduce la respuesta.
+// La puerta es una llamada en segundo plano y NO puede abrir el navegador oculto: un hoster con puerta
+// JavaScript vuelve como `needs_browser` y lo captura este plugin, que sí puede.
+const RESOLVER_ALIAS = "resolver";
+
+function puertaDisponible() {
+  try { return !!(kino && kino.plugins && typeof kino.plugins.call === "function"); } catch (_) { return false; }
+}
+
+/** Una respuesta de la puerta, sin lanzar: `{ res }` o `{ code, missing }`. */
+async function puertaResolve(url, referer) {
+  if (!puertaDisponible()) return { code: "provider_missing", missing: true };
+  try {
+    return { res: (await kino.plugins.call(RESOLVER_ALIAS, "resolve", { url, referer })) || null };
+  } catch (e) {
+    const code = (e && e.code) || "call_failed";
+    kino.log("resolver: " + code);
+    return { code, missing: code === "provider_missing" };
+  }
+}
+
+/** Los servidores ordenados por cómo reproduce de verdad cada hoster (llamada `rank` del resolver). */
+async function ordenaConResolver(lista) {
+  if (lista.length < 2 || !puertaDisponible()) return lista;
+  try {
+    const r = await kino.plugins.call(RESOLVER_ALIAS, "rank", {
+      urls: lista.slice(0, 64).map((s) => String(s.url || s.host || s.name || "")),
+    });
+    const scores = r && Array.isArray(r.scores) ? r.scores : null;
+    if (!scores) return lista;
+    // -1 significa "no lo ofrezcas": el hoster está muerto o tiene una puerta imposible.
+    return lista
+      .map((s, i) => ({ s, i, score: typeof scores[i] === "number" ? scores[i] : 0 }))
+      .filter((x) => x.score >= 0)
+      .sort((a, b) => b.score - a.score || a.i - b.i)
+      .map((x) => x.s);
+  } catch (_) { return lista; }
+}
+
+/** El stream de la puerta en la forma de Kino: kind→mime, headers (lista u objeto) y subtítulos. */
+function streamDePuerta(res, referer, nombre) {
+  const lista = res && Array.isArray(res.streams) ? res.streams : [];
+  const st = lista.find((s) => s && s.url && (s.kind === "hls" || /\.m3u8(\?|$)/i.test(s.url))) ||
+    lista.find((s) => s && s.url);
+  if (!st) return null;
+  const headers = { "User-Agent": UA };
+  if (st.referer || referer) headers.Referer = st.referer || referer;
+  if (Array.isArray(st.headers)) {
+    for (const h of st.headers) if (h && h.name) headers[h.name] = String(h.value);
+  } else if (st.headers && typeof st.headers === "object") {
+    for (const k of Object.keys(st.headers)) if (st.headers[k] != null) headers[k] = String(st.headers[k]);
+  }
+  const hls = st.kind === "hls" || /\.m3u8(\?|$)/i.test(st.url);
+  const subs = (Array.isArray(res && res.subtitles) ? res.subtitles : [])
+    .filter((s) => s && typeof s.url === "string" && s.url)
+    .slice(0, 30)
+    .map((s) => ({ url: s.url, lang: (typeof s.lang === "string" && s.lang) || "und" }));
+  return {
+    url: st.url,
+    mime: hls ? "application/x-mpegURL" : (st.kind === "mp4" ? "video/mp4" : undefined),
+    headers,
+    serverName: st.server || nombre,
+    ...(subs.length ? { subtitles: subs } : {}),
+  };
+}
+
+/** Un enlace de un CDN de anuncios (el pre-roll del reproductor). */
+function pareceAnuncio(url) {
+  return /tiktokcdn|doubleclick|ad-site|\/ad\/|\badvert/i.test(String(url || ""));
+}
+
+/**
+ * El medio que de verdad es la película: un manifiesto (HLS/DASH) que no sea publicidad, comprobado con
+ * listaSana; si ninguno pasa, el primero que no venga de un CDN de anuncios. Nunca `media[0]` a ciegas,
+ * que en estos reproductores es el pre-roll.
+ */
+async function mejorMedia(media) {
+  const lista = (Array.isArray(media) ? media : []).filter((m) => m && typeof m.url === "string" && m.url);
+  const limpios = lista.filter((m) => !pareceAnuncio(m.url));
+  const pool = limpios.length ? limpios : lista;
+  const manifiestos = pool.filter((m) =>
+    m.mime === "application/x-mpegURL" || m.mime === "application/dash+xml" || /\.(m3u8|mpd)(\?|$)/i.test(m.url));
+  for (const m of manifiestos.slice(0, 3)) {
+    if (await listaSana(m.url, { headers: m.headers || {} })) return m;
+  }
+  return manifiestos[0] || pool[0] || null;
+}
+
 function formatLang(lang) {
   const l = String(lang || "").toUpperCase();
   if (l.includes("LAT")) return "🇲🇽 Latino";
@@ -863,74 +988,175 @@ function formatLang(lang) {
   return lang || "Audio";
 }
 
-async function verificaServidor(s, origin, params, ui, pide) {
+async function verificaServidor(s, origin, params, ui, pide, hasta) {
+  const referer = `${origin}/`;
+  // Cada intento tiene su propio reloj: ni una petición puede comerse la llamada entera.
+  const peticion = { ...pide, timeoutMs: Math.max(1200, Math.min(6000, restante(hasta || Date.now() + ATTEMPT_MS))) };
+  let v = null;
   try {
-    const v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, pide);
-    if (!v) return null;
+    v = await getJson(`${origin}/video?${params}&noiframe=1&embed=${encodeURIComponent(s.id)}&r=1&ui=${encodeURIComponent(ui)}`, peticion);
+  } catch (_) { v = null; }
 
-    if (v.url && v.type !== "iframe") {
-      if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, pide))) {
-        kino.log(`flujo: lista sin vídeo en ${s.name || s.id.slice(0, 8)}, se salta`);
-        return null;
-      }
-      return {
-        url: v.url,
-        mime: v.type === "hls" ? "application/x-mpegURL" : (v.type === "dash" ? "application/dash+xml" : (v.type === "mp4" ? "video/mp4" : undefined)),
-        headers: { "User-Agent": UA, Referer: `${origin}/` },
-        serverName: s.name || s.host || "Servidor",
-        lang: s.lang || "",
-      };
+  // 1) El reproductor ya da el enlace: es lo más rápido y no pasa por ningún hoster.
+  if (v && v.url && v.type !== "iframe") {
+    if ((v.type === "hls" || v.type === "dash") && !(await listaSana(v.url, peticion))) {
+      kino.log(`flujo: lista sin vídeo en ${s.name || String(s.id).slice(0, 8)}, se salta`);
+      return null;
     }
+    // Un mp4 no se puede medir sin descargarlo, pero al menos no puede venir de un CDN de anuncios.
+    if (v.type === "mp4" && pareceAnuncio(v.url)) return null;
+    return {
+      url: v.url,
+      mime: v.type === "hls" ? "application/x-mpegURL" : (v.type === "dash" ? "application/dash+xml" : (v.type === "mp4" ? "video/mp4" : undefined)),
+      headers: { "User-Agent": UA, Referer: referer },
+      serverName: s.name || s.host || "Servidor",
+      lang: s.lang || "",
+    };
+  }
 
-    const targetUrl = v.url || s.url;
-    if (targetUrl && (v.type === "iframe" || /^https?:\/\//i.test(targetUrl))) {
-      if (typeof kino !== "undefined" && kino.plugins && typeof kino.plugins.call === "function") {
-        try {
-          const res = await kino.plugins.call("resolver", "resolve", { url: targetUrl, referer: `${origin}/` });
-          if (res && Array.isArray(res.streams) && res.streams.length > 0) {
-            const st = res.streams[0];
-            const hdrs = { "User-Agent": UA, Referer: st.referer || `${origin}/` };
-            if (Array.isArray(st.headers)) {
-              for (const h of st.headers) if (h && h.name) hdrs[h.name] = String(h.value);
-            }
-            return {
-              url: st.url,
-              mime: st.kind === "hls" ? "application/x-mpegURL" : (st.kind === "mp4" ? "video/mp4" : "application/x-mpegURL"),
-              headers: hdrs,
-              serverName: st.server || s.name || "Kino Resolver",
-              lang: s.lang || "",
-            };
-          }
-        } catch (_) {}
-      }
+  // 2) Hoster o iframe (o /video caído): lo resuelve el motor compartido, no este plugin.
+  const embedUrl = (v && v.url) || s.url;
+  if (!embedUrl || !/^https?:\/\//i.test(String(embedUrl))) return null;
+  const r = await puertaResolve(embedUrl, referer);
+  if (r.res) {
+    // `dead`: hoster borrado o bloqueado. Ningún navegador lo arregla, así que no se pierde tiempo capturándolo.
+    if (r.res.error === "dead") {
+      kino.log(`flujo: ${s.name || String(s.id).slice(0, 8)} muerto en el motor`);
+      return null;
     }
-  } catch (_) {}
+    const out = streamDePuerta(r.res, referer, s.name || "Kino Resolver");
+    if (out) { out.lang = s.lang || ""; return out; }
+  }
+  // needs_browser / provider_missing: la puerta no puede abrir el navegador; este plugin sí, y lo hace el respaldo.
   return null;
 }
 
+// ── El presupuesto de una reproducción ──────────────────────────
+// Kino da 20 s a resolve(); con el navegador oculto aprobado, 75 s. Todo se mide contra ese reloj:
+// ninguna petición puede comerse la llamada, y lo que no entra en el presupuesto no se intenta.
+const RESOLVE_MS = 18000;
+const RESOLVE_BROWSER_MS = 56000;
+const ATTEMPT_MS = 5200;          // un servidor que no contesta en esto ya no interesa
+const MAX_SERVIDORES = 8;         // servidores que se prueban en una reproducción
+const MAX_ALTERNATIVAS = 8;       // copias que Kino enseña en "Servidor y calidad"
+const MAX_REF = 480;              // Kino descarta una copia cuya ref pase de 512
+const CACHE_OK = 30 * 60 * 1000;  // un enlace que funcionó vale media hora
+
+const restante = (hasta) => Math.max(0, hasta - Date.now());
+
+/** Lo que la persona lee cuando el sitio no tiene el título: no es un fallo, es su catálogo. */
+function noDisponible(data) {
+  const que = data && (data.type === "serie" || data.type === "episodio") ? "Esta serie" : "Este título";
+  return kino.error("not_found", "sin servidores en el sitio", {
+    userMessage: `${que} no está disponible en CineHax+.`,
+  });
+}
+
+/** El idioma preferido del ajuste `idioma`, como prefijo de los `lang` del sitio. */
+function idiomaPreferido() {
+  const v = String(kino.config.get("idioma") || "auto");
+  return v === "lat" ? "LAT" : v === "cast" ? "ESP" : v === "sub" ? "SUB" : "";
+}
+
+/** La etiqueta de una copia: idioma · servidor. */
+function etiqueta(s, lang) {
+  const idioma = formatLang(s.lang || lang || "");
+  const nombre = s.name || s.host || "Servidor";
+  return `${idioma} · ${nombre}`.slice(0, 48);
+}
+
+// ── Copias alternativas (la hoja "Servidor y calidad" de Kino) ──
+function b64url(texto) {
+  const bytes = new TextEncoder().encode(texto);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function unb64url(s) {
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  try {
+    const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch (_) { return null; }
+}
+
 /**
- * El vídeo no está en la página: la web solo deja una fachada con espera, y el reproductor incrustado
- * pide el enlace a su propia API con dos credenciales que ella misma sirve (pass del sitio + ui suyo).
- * Así se salta el anuncio del reproductor y el browser oculto, que a menudo no llega a montar nada.
+ * Una copia se guarda como `alt:` + base64url({w,x,n,l}): la dirección de la ficha, el ÍNDICE del servidor
+ * en la lista del reproductor (los ids reales son largos y no caben en una ref), su nombre y su idioma.
  */
-async function flujoPlayer(watchUrl) {
-  const t0 = Date.now();
-  const page = await getText(watchUrl);
+function refCopia(watchUrl, s, lang, indice) {
+  return "alt:" + b64url(JSON.stringify({
+    w: watchUrl, x: indice, n: s.name || s.host || "Servidor", l: s.lang || lang || "",
+  }));
+}
+
+function decodeAlt(ref) {
+  if (typeof ref !== "string" || ref.slice(0, 4) !== "alt:") return null;
+  const raw = unb64url(ref.slice(4));
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(raw);
+    return d && typeof d.w === "string" && Number.isInteger(d.x) && d.x >= 0 ? d : null;
+  } catch (_) { return null; }
+}
+
+/** Las demás copias, como alternativas diferidas: Kino solo las resuelve si la persona las elige. */
+function conAlternativas(stream, orden, elegido, watchUrl, lista) {
+  const origen = lista || [];
+  const alternatives = (orden || [])
+    .filter((s) => s !== elegido)
+    .map((s) => ({ s, x: origen.indexOf(s) }))
+    .filter((c) => c.x >= 0)
+    .slice(0, MAX_ALTERNATIVAS)
+    .map((c) => ({ label: etiqueta(c.s, ""), ref: refCopia(watchUrl, c.s, "", c.x) }))
+    .filter((a) => a.ref.length <= MAX_REF);
+  return alternatives.length ? { ...stream, alternatives } : stream;
+}
+
+/** El último enlace bueno de un título (30 min), para no repetir cuatro peticiones cada vez. */
+function leerBueno(clave) {
+  const v = cacheGet(clave);
+  return v && typeof v.url === "string" && v.url ? v : null;
+}
+
+function guardarBueno(clave, stream) {
+  cacheSet(clave, {
+    url: stream.url,
+    headers: stream.headers || {},
+    mime: stream.mime,
+    label: stream.label,
+    // Las copias viajan con el enlace guardado: la hoja "Servidor y calidad" sigue ahí al repetir.
+    alternatives: Array.isArray(stream.alternatives) ? stream.alternatives.slice(0, MAX_ALTERNATIVAS) : undefined,
+  }, CACHE_OK);
+}
+
+/**
+ * Abre el reproductor incrustado: la fachada de la página, el pass del sitio, su PM_UI y la lista de
+ * servidores. Devuelve null si el sitio no deja ni eso.
+ */
+async function abreReproductor(watchUrl) {
+  const page = await getText(watchUrl, { timeoutMs: 7000 });
   const embed = embedTag(page);
   if (!embed) return null;
 
   // El pass dura 10 minutos y va atado al título: se pide siempre fresco, desde el sitio.
-  const pass = await getJson(embed.pass);
+  const pass = await getJson(embed.pass, { timeoutMs: 6000 });
   if (!pass || !pass.pass) return null;
 
   const sep = embed.src.includes("?") ? "&" : "?";
-  const embedRes = await kino.fetch(`${embed.src}${sep}pass=${encodeURIComponent(pass.pass)}`, { headers: { "User-Agent": UA } });
-  const embedHtml = embedRes.ok ? await embedRes.text() : null;
+  let embedHtml = null;
+  try {
+    const r = await kino.fetch(`${embed.src}${sep}pass=${encodeURIComponent(pass.pass)}`, {
+      headers: { "User-Agent": UA }, timeoutMs: 8000,
+    });
+    embedHtml = r.ok ? await r.text() : null;
+  } catch (_) { embedHtml = null; }
   if (!embedHtml) return null;
 
   const ui = (embedHtml.match(/PM_UI="([^"]+)"/) || [])[1];
   let emb = null;
-  try { emb = JSON.parse((embedHtml.match(/PM_EMBED=(\{[^}]+\})/) || [])[1] || "null"); } catch { /* vale la dirección del embed */ }
+  try { emb = JSON.parse((embedHtml.match(/PM_EMBED=(\{[^}]+\})/) || [])[1] || "null"); } catch (_) { /* vale la dirección del embed */ }
   if (!emb) emb = embFromSrc(embed.src);
   const origin = originOf(embed.src);
   if (!ui || !emb || !emb.tmdb || !origin) return null;
@@ -938,33 +1164,140 @@ async function flujoPlayer(watchUrl) {
   const params = embParams(emb);
   const pide = { headers: { "User-Agent": UA } };
   const srv = await getJson(`${origin}/servers?${params}&ui=${encodeURIComponent(ui)}`, pide);
-  const lista = srv && Array.isArray(srv.servers) ? srv.servers : [];
-  if (!lista.length) return null;
+  if (!srv) return null;
+  const lista = (Array.isArray(srv.servers) ? srv.servers : []).filter((s) => s && s.id);
+  return {
+    origin, params, ui, pide, lista, lang: emb.lang || "",
+    pendiente: srv.pendiente === true,
+    embed, watchUrl,
+  };
+}
 
-  const orden = ordenaServidores(lista, emb.lang);
-  for (let i = 0; i < orden.length && i < 10; i += 1) {
+/**
+ * El vídeo no está en la página: la web solo deja una fachada con espera, y el reproductor incrustado
+ * pide el enlace a su propia API con dos credenciales que ella misma sirve (pass del sitio + ui suyo).
+ * Así se salta el anuncio del reproductor y el navegador oculto, que a menudo no llega a montar nada.
+ * `{ stream, orden, servidor }` cuando hay copia; `{ vacio: true, pendiente }` cuando el sitio no tiene.
+ */
+async function flujoPlayer(watchUrl, opts = {}) {
+  const t0 = Date.now();
+  const hasta = opts.hasta || Date.now() + RESOLVE_MS;
+  const reproductor = await abreReproductor(watchUrl);
+  if (!reproductor) return null;
+  if (!reproductor.lista.length) {
+    return { vacio: true, pendiente: reproductor.pendiente, reproductor };
+  }
+
+  // La copia pedida llega como índice en la lista del reproductor (una ref tiene que ser corta).
+  const elegida = Number.isInteger(opts.preferidoIdx) ? reproductor.lista[opts.preferidoIdx] : null;
+  let orden = ordenaServidores(reproductor.lista, reproductor.lang, idiomaPreferido());
+  if (elegida) {
+    const i = orden.indexOf(elegida);
+    if (i > 0) orden = [orden[i], ...orden.slice(0, i), ...orden.slice(i + 1)];
+  }
+  orden = await ordenaConResolver(orden);
+
+  const limite = Math.min(orden.length, MAX_SERVIDORES);
+  let pidioMotor = false; // hubo un hoster que solo el motor compartido podía abrir
+  for (let i = 0; i < limite; i += 1) {
+    if (restante(hasta) < 1200) break; // sin tiempo para otro intento: mejor responder ya
     const s = orden[i];
-    const res = await verificaServidor(s, origin, params, ui, pide);
-    if (res) {
-      kino.log(`flujo: resuelto con ${res.serverName} en ${Date.now() - t0} ms`);
-      return {
+    const res = await verificaServidor(s, reproductor.origin, reproductor.params, reproductor.ui, reproductor.pide, hasta);
+    if (!res) {
+      if (s.url && !puertaDisponible()) pidioMotor = true;
+      continue;
+    }
+    kino.log(`flujo: ${res.serverName} en ${Date.now() - t0} ms`);
+    return {
+      stream: {
         url: res.url,
         headers: res.headers,
         mime: res.mime,
-      };
-    }
+        label: res.subtitles ? `${etiqueta(s, reproductor.lang)} · subtítulos` : etiqueta(s, reproductor.lang),
+        ...(res.subtitles ? { subtitles: res.subtitles } : {}),
+      },
+      orden,
+      servidor: s,
+      reproductor,
+    };
   }
-  return null;
+  return { vacio: true, pendiente: reproductor.pendiente, reproductor, orden, pidioMotor };
+}
+
+/** El navegador oculto: último recurso, solo si Kino lo permite y queda tiempo. Nunca `media[0]` a ciegas. */
+async function capturaDelReproductor(watchUrl, hasta) {
+  const page = await getText(watchUrl, { timeoutMs: 6000 });
+  const embed = embedTag(page);
+  const url = embed ? embed.src : watchUrl;
+  const origin = originOf(url);
+  const referer = origin ? `${origin}/` : `${BASE}/`;
+  let captured = null;
+
+  if (kino.browser && typeof kino.browser.capture === "function") {
+    try {
+      captured = await kino.browser.capture(url, {
+        timeoutMs: Math.min(18000, Math.max(6000, restante(hasta) - 2500)),
+        headers: { Referer: referer },
+      });
+    } catch (_) { captured = null; }
+  }
+  if ((!captured || !captured.media || !captured.media.length) &&
+      kino.browser && typeof kino.browser.page === "function" && restante(hasta) > 8000) {
+    try {
+      captured = await kino.browser.page(url, { timeoutMs: Math.min(20000, restante(hasta) - 2000), autoplay: true });
+    } catch (_) { captured = null; }
+  }
+
+  const best = await mejorMedia(captured && captured.media);
+  if (!best) return null;
+  const subtitles = (Array.isArray(captured && captured.subtitles) ? captured.subtitles : [])
+    .filter((s) => s && typeof s.url === "string" && s.url)
+    .slice(0, 30)
+    .map((s) => ({ url: s.url, lang: (typeof s.lang === "string" && s.lang) || "und" }));
+  return {
+    url: best.url,
+    headers: best.headers || {},
+    mime: best.mime || undefined,
+    label: "Reproductor",
+    ...(subtitles.length ? { subtitles } : {}),
+  };
+}
+
+/** Una copia elegida en la hoja "Servidor y calidad": se vuelve a abrir el reproductor y se prueba esa. */
+async function resuelveAlternativa(alt) {
+  const hasta = Date.now() + (kino.browser ? 30000 : 16000);
+  const r = await flujoPlayer(alt.w, { hasta, preferidoIdx: alt.x });
+  if (!r || !r.stream) {
+    throw kino.error("not_found", "la copia no abrió", {
+      userMessage: "Esa copia no está disponible ahora. Prueba con otra.",
+    });
+  }
+  return { ...r.stream, label: etiqueta({ name: alt.n, lang: alt.l }, alt.l) };
 }
 
 export async function resolve(ref) {
+  return resuelve(ref, true);
+}
+
+/** El cuerpo de resolve(), con o sin navegador oculto y con un presupuesto propio (`prepare` lo llama sin él). */
+async function resuelve(ref, permitirNavegador, limiteMs) {
   await null;
+  // Kino espera a los fetches que una llamada deja vivos antes de entregar la respuesta: se le pide
+  // que los suelte al responder (Kino 0.9.55+; en versiones anteriores es una propiedad ignorada).
+  try { globalThis.__kinoDropPendingFetches = true; } catch (_) {}
+
   const data = decodeRef(ref);
-  if (!data || typeof data.slug !== "string" || !data.slug) throw kino.error("not_found", "ref inválido");
+  if (!data) throw kino.error("not_found", "ref inválido");
+  // Una copia de la hoja "Servidor y calidad" trae su propio camino.
+  if (data.alt) return resuelveAlternativa(data.alt);
+  if (typeof data.slug !== "string" || !data.slug) throw kino.error("not_found", "ref inválido");
 
   const slug = data.slug;
-  let watchUrl;
+  const conNavegador = permitirNavegador && !!(kino && kino.browser && (kino.browser.capture || kino.browser.page));
+  const limite = limiteMs || (conNavegador ? RESOLVE_BROWSER_MS : RESOLVE_MS);
+  const hasta = Date.now() + limite;
 
+  let watchUrl;
   if (data.type === "pelicula") {
     watchUrl = `${BASE}/pelicula/${slug}`;
   } else if (data.type === "episodio") {
@@ -974,42 +1307,55 @@ export async function resolve(ref) {
     // Sin episodio elegido: se abre el primero de la primera temporada.
     const html = await getText(`${BASE}/serie/${slug}/temporada/1`);
     const m = html && /\/temporada\/1\/episodio\/(\d+)/.exec(html);
-    const ep = m ? parseInt(m[1], 10) : 1;
-    watchUrl = `${BASE}/serie/${slug}/temporada/1/episodio/${ep}`;
+    watchUrl = `${BASE}/serie/${slug}/temporada/1/episodio/${m ? parseInt(m[1], 10) : 1}`;
   } else {
     throw kino.error("not_found", "tipo de ref desconocido");
   }
 
-  // Primero el enlace directo que sirve el reproductor incrustado: rápido y sin anuncios.
-  const stream = await flujoPlayer(watchUrl);
-  if (stream) return stream;
-
-  // Último recurso: cargar el iframe, no la página del catálogo. La página principal
-  // puede exponer el tráiler en og:video (como Hermosa Justicia) antes del player real.
-  // browser.page ejecuta el reproductor incrustado y permite seleccionar media real.
-  const pageHtml = await getText(watchUrl);
-  const fallbackEmbed = embedTag(pageHtml);
-  const fallbackUrl = fallbackEmbed ? fallbackEmbed.src : watchUrl;
-  kino.log.report("resolve_fallback", "sin enlace directo del reproductor, se abre el iframe del player");
-  const captured = await kino.browser.page(fallbackUrl, { timeoutMs: 30000, autoplay: true });
-
-  if (!captured.media || !captured.media.length) {
-    throw kino.error("not_found", "no se encontró video en la página", { userMessage: "No se encontró el video de este título." });
+  // 1) El enlace que ya funcionó para este título (30 min): una lista que aún responde se usa tal cual.
+  const clave = `ok:${data.type}:${slug}:${data.season || ""}:${data.episode || ""}`;
+  const bueno = leerBueno(clave);
+  if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} })) {
+    kino.log(`flujo: enlace guardado de ${slug}`);
+    return {
+      url: bueno.url,
+      headers: bueno.headers || {},
+      mime: bueno.mime,
+      ...(bueno.label ? { label: bueno.label } : {}),
+      ...(Array.isArray(bueno.alternatives) && bueno.alternatives.length ? { alternatives: bueno.alternatives } : {}),
+    };
   }
 
-  // La primera entrada es siempre el manifiesto (HLS/DASH), que es lo que se quiere reproducir.
-  const best = captured.media[0];
-  const subtitles = (Array.isArray(captured.subtitles) ? captured.subtitles : [])
-    .filter((s) => s && typeof s.url === "string" && s.url)
-    .slice(0, 30)
-    .map((s) => ({ url: s.url, lang: (typeof s.lang === "string" && s.lang) || "und" }));
+  // 2) El reproductor incrustado, con su parte del presupuesto (y el resto para el navegador si hay).
+  const fase = conNavegador ? Math.min(10000, hasta - Date.now() - 8000) : limite - 2000;
+  const r = await flujoPlayer(watchUrl, { hasta: Math.min(hasta, Date.now() + Math.max(4000, fase)) });
+  if (r && r.stream) {
+    const salida = conAlternativas(r.stream, r.orden, r.servidor, watchUrl, r.reproductor.lista);
+    guardarBueno(clave, salida);
+    return salida;
+  }
 
-  return {
-    url: best.url,
-    headers: best.headers || {},
-    mime: best.mime || undefined,
-    ...(subtitles.length ? { subtitles } : {}),
-  };
+  // 3) El sitio dice que no tiene nada (`pendiente: false`): no tiene sentido gastar 20 s de navegador.
+  if (r && r.vacio && !r.pendiente) throw noDisponible(data);
+
+  // 4) El sitio avisa de que aún lo está preparando: el navegador tampoco va a encontrar nada.
+  if (r && r.pendiente) {
+    throw kino.error("unavailable", "el sitio aún prepara este título", {
+      userMessage: "CineHax+ todavía está preparando este título. Inténtalo en unos minutos.",
+    });
+  }
+
+  // 5) Navegador oculto, solo con tiempo de sobra.
+  if (conNavegador && restante(hasta) > 8000) {
+    const stream = await capturaDelReproductor(watchUrl, hasta);
+    if (stream) return stream;
+  }
+
+  throw kino.error("not_found", "sin copia reproducible", {
+    userMessage: r && r.pidioMotor
+      ? "Instala el motor de reproducción compartido desde el menú de plugins y vuelve a intentar."
+      : "No se encontró una copia que se pueda reproducir.",
+  });
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1019,13 +1365,14 @@ export async function resolve(ref) {
 export async function settingsStatus() {
   await null;
   const chequeo = kino.storage.get("chequeo");
-  return {
-    estado: chequeo === "ok"
-      ? "cinehaxplus.com respondió en la última comprobación"
-      : chequeo === "fallo"
-        ? "El sitio no respondió en la última comprobación"
-        : "Sin comprobación todavía",
-  };
+  let guardados = 0;
+  try { guardados = kino.storage.keys().filter((k) => k.indexOf("ok:") === 0).length; } catch (_) { guardados = 0; }
+  const sitio = chequeo === "ok"
+    ? "cinehaxplus.com respondió en la última comprobación"
+    : chequeo === "fallo"
+      ? "El sitio no respondió en la última comprobación"
+      : "Sin comprobación todavía";
+  return { estado: `${sitio} · ${guardados} ${guardados === 1 ? "enlace guardado" : "enlaces guardados"}` };
 }
 
 export async function action(key) {
@@ -1045,6 +1392,8 @@ export async function action(key) {
   if (key === "limpiar") {
     cacheDrop("buscar:");
     cacheDrop("serie:");
+    cacheDrop("temporada:");
+    cacheDrop("ok:");
     return { message: "Caché borrada", refresh: true };
   }
   return null;
@@ -1056,7 +1405,59 @@ export async function validateSettings(values) {
   if (v !== undefined && v !== null && ["ambas", "peliculas", "series"].indexOf(String(v)) < 0) {
     return { pestanas: "Elige una opción de la lista" };
   }
+  const idioma = values && values.idioma;
+  if (idioma !== undefined && idioma !== null && ["auto", "lat", "cast", "sub"].indexOf(String(idioma)) < 0) {
+    return { idioma: "Elige una opción de la lista" };
+  }
   return null;
+}
+
+// ──────────────────────────────────────────────────────────────
+// PANEL — lo que Kino enseña en el reproductor (solo lectura: no toca la reproducción)
+// ──────────────────────────────────────────────────────────────
+
+function mmss(ms) {
+  const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+export async function panel(ctx) {
+  await null;
+  const c = ctx || {};
+  const copia = c.playing || {};
+  const titulo = String(c.title || "CineHax+");
+  const ficha = c.kind === "episode" && c.season
+    ? `${titulo} · T${c.season}${c.episode ? ` E${c.episode}` : ""}`
+    : titulo;
+  const idioma = String(kino.config.get("idioma") || "auto");
+  const nombreIdioma = { auto: "Automático", lat: "Latino", cast: "Castellano", sub: "Subtitulado" }[idioma] || "Automático";
+  const motor = puertaDisponible() ? "instalado" : "no instalado";
+  const tiempo = c.durationMs ? `${mmss(c.positionMs)} de ${mmss(c.durationMs)}` : (c.positionMs ? mmss(c.positionMs) : "en directo");
+  const datos = [copia.lang, copia.quality, copia.server].filter((x) => typeof x === "string" && x).join(" · ");
+
+  const tab = c.tab === "ajustes" ? "ajustes" : "copia";
+  const cuerpo = tab === "copia"
+    ? [
+      { type: "text", key: "p-titulo", text: ficha, variant: "title" },
+      { type: "text", key: "p-copia", text: copia.label ? `Reproduciendo: ${copia.label}` : "Reproduciendo esta copia" },
+      { type: "text", key: "p-datos", text: datos || "El reproductor no informa del servidor", variant: "caption" },
+      { type: "text", key: "p-tiempo", text: tiempo, variant: "caption" },
+      { type: "text", key: "p-nota", text: "Si esta copia falla, vuelve a la ficha y elige otra en «Servidor y calidad».", variant: "caption" },
+    ]
+    : [
+      { type: "text", key: "p-aj-titulo", text: "Preferencias de CineHax+", variant: "title" },
+      { type: "text", key: "p-aj-idioma", text: `Idioma preferido: ${nombreIdioma}` },
+      { type: "text", key: "p-aj-motor", text: `Motor de reproducción: ${motor}` },
+      { type: "text", key: "p-aj-nota", text: "Se cambian en Ajustes → Plugins → CineHax+.", variant: "caption" },
+    ];
+
+  return {
+    format: "screen",
+    title: "CineHax+",
+    tabs: [{ id: "copia", label: "Esta copia" }, { id: "ajustes", label: "Preferencias" }],
+    tab,
+    root: { type: "col", key: "p-root", gap: 6, children: cuerpo },
+  };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1068,9 +1469,31 @@ function screenListRef(tab) {
   return encodeRef({ list: tab === "series" ? "series" : "peliculas" });
 }
 
+/** Sin el motor compartido no hay hosters: Kino no instala los `recommends` solo, así que se ofrece aquí. */
+function pantallaInstalar() {
+  return {
+    type: "scaffold", key: "cinehax-instalar",
+    appBar: { type: "appBar", key: "cinehax-instalar-bar", title: "CineHax+", mergeWithKinoBar: true },
+    body: {
+      type: "scroll", key: "cinehax-instalar-scroll",
+      children: [{
+        type: "col", key: "cinehax-instalar-col", gap: 14, padding: { x: 20, y: 18 },
+        children: [
+          { type: "text", key: "cinehax-instalar-t", text: "Falta el motor de reproducción", variant: "title" },
+          { type: "text", key: "cinehax-instalar-p", text: "CineHax+ resuelve los reproductores con el motor compartido (Kino Resolver). Instálalo una vez y no hace falta nada más." },
+          { type: "button", key: "cinehax-instalar-b", label: "Instalar Kino Resolver", variant: "primary", onPressed: { go: { installPlugin: { repo: "xuper-plugin/kino-plugin-kino-resolver" } } } },
+        ],
+      }],
+    },
+  };
+}
+
 export async function screen(arg) {
   const state = (arg && arg.state) || {};
   const device = (arg && arg.device) || "phone";
+  // El motor compartido resuelve los hosters: si falta, se ofrece instalarlo antes que enseñar el catálogo.
+  const instalados = arg && arg.installed;
+  if (instalados && !instalados["xuper-plugin/kino-plugin-kino-resolver"]) return pantallaInstalar();
   const tab = state.tab === "series" ? "series" : "peliculas";
   const query = typeof state.query === "string" ? state.query.trim() : "";
   const page = Math.max(1, Number(state.page) || 1);
@@ -1080,8 +1503,9 @@ export async function screen(arg) {
 
   try {
     if (query) {
-      const result = await search(query);
-      items = (result && result.items) || [];
+      // search() espera un TitleContext ({ q, type, … }), no un string, y devuelve Item[].
+      const result = await search({ q: query, type: tab === "series" ? "series" : "movie" });
+      items = Array.isArray(result) ? result : (result && result.items) || [];
     } else {
       const result = await browse(screenListRef(tab), String(page));
       items = (result && result.items) || [];

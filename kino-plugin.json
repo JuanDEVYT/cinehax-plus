@@ -2,7 +2,7 @@
   "id": "cinehax-plus",
   "name": "CineHax+",
   "creator": "JuandreXter",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "apiVersion": 20,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -14,7 +14,8 @@
       "door": "resolver",
       "calls": [
         "resolve",
-        "normalizeHost"
+        "normalizeHost",
+        "rank"
       ]
     }
   },
@@ -55,6 +56,10 @@
   "section": {
     "label": "CineHax+"
   },
+  "panel": {
+    "label": "CineHax+",
+    "labelEn": "CineHax+"
+  },
   "theme": {
     "accent": "#2563EB",
     "onAccent": "#FFFFFF",
@@ -90,6 +95,31 @@
       "default": "ambas"
     },
     {
+      "key": "idioma",
+      "label": "Idioma preferido",
+      "type": "select",
+      "hint": "Qué copia se prueba primero cuando el reproductor ofrece varias",
+      "options": [
+        {
+          "value": "auto",
+          "label": "Automático"
+        },
+        {
+          "value": "lat",
+          "label": "Latino"
+        },
+        {
+          "value": "cast",
+          "label": "Castellano"
+        },
+        {
+          "value": "sub",
+          "label": "Subtitulado"
+        }
+      ],
+      "default": "auto"
+    },
+    {
       "key": "sitio",
       "label": "Sitio",
       "type": "section"
@@ -113,6 +143,6 @@
   ],
   "signature": {
     "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
-    "value": "957a70a1c880eb2bca24ca7408493b0073553098190bf4a2537e436d1ea222460f7c046510aa7cf86fcbbe807e19ed7aefd52d94c2d216b274c63bd345526104"
+    "value": "44df79d13479866e8ed258593dd2ddd82ed0736e16fcb29e5b2bad93f4982793cc195d12468198200d0d11d248d7ee98c66e91722a031ccac6ac630ca7bbb40a"
   }
 }
