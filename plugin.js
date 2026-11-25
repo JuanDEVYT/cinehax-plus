@@ -1461,110 +1461,296 @@ export async function panel(ctx) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// SCREEN — catálogo nativo CineHax+
+// SCREEN — catálogo nativo CineHax+, con la barra de navegación de Xuper
 // ──────────────────────────────────────────────────────────────
 const SCREEN_PAGE_SIZE = 36;
+const HOME_TTL_MS = 5 * 60 * 1000;   // la portada en memoria: cambiar de sección no vuelve a pedirla
+const HOME_RAILS = 6;
+const RAIL_ITEMS = 18;
 
-function screenListRef(tab) {
-  return encodeRef({ list: tab === "series" ? "series" : "peliculas" });
+// Las cuatro secciones de la barra inferior (Kino dibuja de 2 a 5). En TV no hay barra inferior:
+// la navegación va como TabBar en la cabecera, igual que en Xuper.
+const NAV = [
+  { key: "inicio", icon: "home", es: "Inicio", en: "Home" },
+  { key: "peliculas", icon: "movie", es: "Películas", en: "Movies" },
+  { key: "series", icon: "tv", es: "Series", en: "Series" },
+  { key: "ajustes", icon: "settings", es: "Ajustes", en: "Settings" },
+];
+const NAV_KEYS = NAV.map((n) => n.key);
+const navName = (v) => (NAV_KEYS.indexOf(String(v)) >= 0 ? String(v) : "inicio");
+const navOf = (nav) => NAV.find((n) => n.key === nav) || NAV[0];
+
+/** La barra oculta que toda vista lleva: una acción la enseña al instante y la respuesta la esconde. */
+const busyBar = () => ({ type: "LinearProgressIndicator", key: "busy", hidden: true });
+const busyEvent = (event, arg) => ({ ui: [{ show: "busy" }], event, ...(arg !== undefined ? { arg: String(arg) } : {}) });
+
+const navBar = (active) => ({
+  type: "NavigationBar", value: active, onChanged: busyEvent("nav"),
+  items: NAV.map((n) => ({ key: n.key, icon: n.icon, label: n.es, labelEn: n.en })),
+});
+const navTabs = (active) => ({
+  type: "TabBar", key: "navTabs", divider: false, value: active, onChanged: busyEvent("nav"),
+  tabs: NAV.map((n) => ({ value: n.key, label: n.es, labelEn: n.en })),
+});
+
+const brand = () => ({
+  type: "Row", key: "brand", gap: 8, crossAxisAlignment: "center",
+  children: [
+    { type: "Icon", key: "brandIcon", name: "movie", color: "primary", size: 22 },
+    { type: "Text", key: "brandText", text: "CineHax+", textEn: "CineHax+", style: "h4" },
+  ],
+});
+
+// mergeWithKinoBar necesita un `leading` o Kino dibuja dos barras: en una sección vuelve a Inicio,
+// en Inicio cierra la pantalla.
+const navBack = (nav) => ({
+  type: "IconButton", key: "navBack", icon: "arrow_back", labelText: "Atrás", labelTextEn: "Back",
+  onPressed: nav && nav !== "inicio" ? busyEvent("nav", "inicio") : { go: { close: true } },
+});
+
+function appBarNode(nav, device, actions) {
+  const base = { type: "AppBar", mergeWithKinoBar: true, dense: true, divider: false, leading: navBack(nav) };
+  const acts = actions && actions.length ? { actions } : {};
+  if (device === "tv") {
+    return { ...base, ...acts, title: { type: "Row", key: "tvTitle", gap: 16, crossAxisAlignment: "center", children: [brand(), navTabs(nav)] } };
+  }
+  const title = nav === "inicio"
+    ? brand()
+    : { type: "Text", key: "scTitle", text: navOf(nav).es, textEn: navOf(nav).en, style: "h4" };
+  return { ...base, ...acts, title };
 }
 
 /** Sin el motor compartido no hay hosters: Kino no instala los `recommends` solo, así que se ofrece aquí. */
-function pantallaInstalar() {
+function pantallaInstalar(device) {
   return {
-    type: "scaffold", key: "cinehax-instalar",
-    appBar: { type: "appBar", key: "cinehax-instalar-bar", title: "CineHax+", mergeWithKinoBar: true },
+    type: "Scaffold", key: "cinehax-instalar",
+    appBar: appBarNode("inicio", device, []),
     body: {
-      type: "scroll", key: "cinehax-instalar-scroll",
-      children: [{
-        type: "col", key: "cinehax-instalar-col", gap: 14, padding: { x: 20, y: 18 },
-        children: [
-          { type: "text", key: "cinehax-instalar-t", text: "Falta el motor de reproducción", variant: "title" },
-          { type: "text", key: "cinehax-instalar-p", text: "CineHax+ resuelve los reproductores con el motor compartido (Kino Resolver). Instálalo una vez y no hace falta nada más." },
-          { type: "button", key: "cinehax-instalar-b", label: "Instalar Kino Resolver", variant: "primary", onPressed: { go: { installPlugin: { repo: "xuper-plugin/kino-plugin-kino-resolver" } } } },
-        ],
-      }],
+      type: "Column", key: "cinehax-instalar-body", flex: 1,
+      mainAxisAlignment: "center", crossAxisAlignment: "center", gap: 16,
+      padding: { compact: 24, expanded: 48 },
+      children: [
+        { type: "Icon", key: "cinehax-instalar-icon", name: "bolt", size: 40, color: "primary" },
+        { type: "Text", key: "cinehax-instalar-t", text: "Falta el motor de reproducción", textEn: "The playback engine is missing", style: "h3", textAlign: "center" },
+        { type: "Text", key: "cinehax-instalar-p", color: "muted", textAlign: "center", text: "CineHax+ resuelve los reproductores con el motor compartido (Kino Resolver). Instálalo una vez y no hace falta nada más.", textEn: "CineHax+ resolves its players with the shared engine (Kino Resolver). Install it once and that is all." },
+        { type: "ElevatedButton", key: "cinehax-instalar-b", icon: "download", labelText: "Instalar Kino Resolver", labelTextEn: "Install Kino Resolver", onPressed: { go: { installPlugin: { repo: "xuper-plugin/kino-plugin-kino-resolver" } } } },
+      ],
     },
   };
 }
+
+// ── datos de la portada (filas de la home, en memoria 5 min) ──
+const HTTPS = /^https:\/\/.+/;
+let homeCache = { at: 0, rows: null };
+async function filasHome() {
+  if (homeCache.rows && Date.now() - homeCache.at < HOME_TTL_MS) return homeCache.rows;
+  try {
+    const html = await getText(`${BASE}/`);
+    const rows = html ? homeRows(html) : [];
+    if (rows.length) { homeCache = { at: Date.now(), rows }; return rows; }
+  } catch (err) {
+    try { kino.log("pantalla inicio: " + ((err && err.message) || err)); } catch (_) { /* sin log */ }
+  }
+  return homeCache.rows || null;
+}
+
+const borde = { compact: { x: 12 }, expanded: { x: 24 } };
+
+/** Un heroCard con el primer título de la portada y un botón que lo reproduce. */
+function heroNode(item) {
+  if (!item || !item.ref) return null;
+  const image = HTTPS.test(String(item.poster || "")) ? item.poster : null;
+  return {
+    type: "heroCard", key: "hero", h: { compact: 200, expanded: 240 },
+    title: String(item.title || "CineHax+").slice(0, 120),
+    text: "Lo más visto hoy en CineHax+", textEn: "The most watched on CineHax+ today",
+    ...(image ? { image } : {}),
+    buttons: [{
+      type: "ElevatedButton", key: "heroPlay", icon: "play",
+      labelText: "Reproducir", labelTextEn: "Play",
+      onPressed: { go: { play: { ref: item.ref, kind: item.kind, id: item.id, title: item.title } } },
+    }],
+  };
+}
+
+const railNode = (row, i) => ({
+  type: "titleRail", key: `rail-${i}`, title: String(row.title || "").slice(0, 80),
+  items: (Array.isArray(row.items) ? row.items : []).slice(0, RAIL_ITEMS),
+  ...(row.ref ? { ref: row.ref } : {}),
+  margin: borde,
+});
+
+const bannerError = (texto, textoEn) => ({
+  type: "MaterialBanner", key: "error", role: "error", margin: borde,
+  text: texto, textEn: textoEn,
+  action: { label: "Reintentar", labelEn: "Retry", onTap: busyEvent("reload") },
+});
+
+async function inicioNodes() {
+  const rows = (await filasHome()) || [];
+  if (!rows.length) return [bannerError("No se pudo cargar el catálogo. Revisa la conexión.", "Could not load. Check your connection.")];
+  const hero = heroNode(rows[0].items && rows[0].items[0]);
+  const rails = rows.slice(0, HOME_RAILS).map(railNode);
+  return [...(hero ? [hero] : []), ...rails];
+}
+
+// ── Películas / Series ──
+const listaRef = (nav) => encodeRef({ list: nav === "series" ? "series" : "peliculas" });
+
+async function listaNodes(nav, page, device) {
+  let items = [];
+  let next = null;
+  try {
+    const r = await browse(listaRef(nav), String(page));
+    items = (r && r.items) || [];
+    next = r && r.next;
+  } catch (err) {
+    try { kino.log("pantalla lista: " + ((err && err.message) || err)); } catch (_) { /* sin log */ }
+    return [bannerError("No se pudo cargar el catálogo. Inténtalo de nuevo.", "Could not load the catalog. Try again.")];
+  }
+
+  const visible = items.slice(0, SCREEN_PAGE_SIZE);
+  if (!visible.length) {
+    return [{ type: "EmptyState", key: "vacio", icon: "movie", title: "Sin títulos", titleEn: "No titles", text: "No hay títulos disponibles ahora.", textEn: "No titles right now." }];
+  }
+
+  const nodes = [{ type: "titleGrid", key: `grid-${nav}-${page}`, columns: { compact: 3, expanded: device === "tv" ? 6 : 5 }, items: visible }];
+  const fila = [{ type: "Text", key: "pagina", text: `Página ${page}`, textEn: `Page ${page}`, style: "caption", color: "muted", align: "center", flex: 1 }];
+  if (page > 1) fila.unshift({ type: "TextButton", key: "anteriores", labelText: "« Anteriores", labelTextEn: "« Previous", onPressed: busyEvent("setPage", page - 1) });
+  if (next) fila.push({ type: "TextButton", key: "siguientes", labelText: "Siguientes »", labelTextEn: "Next »", onPressed: busyEvent("setPage", page + 1) });
+  nodes.push({ type: "Row", key: "paginacion", gap: 12, justify: "center", crossAxisAlignment: "center", margin: { top: 8, bottom: 8 }, children: fila });
+  return nodes;
+}
+
+// ── Búsqueda ──
+async function busquedaNodes(query) {
+  let items = [];
+  try { items = (await search({ q: query })) || []; } catch (err) {
+    try { kino.log("pantalla búsqueda: " + ((err && err.message) || err)); } catch (_) { /* sin log */ }
+  }
+  const head = {
+    type: "Row", key: "q-head", gap: 12, crossAxisAlignment: "center", margin: borde,
+    children: [
+      { type: "Text", key: "q-t", text: `Resultados para “${query}”`, textEn: `Results for “${query}”`, style: "h4", flex: 1, maxLines: 2 },
+      { type: "TextButton", key: "q-clear", labelText: "Quitar", labelTextEn: "Clear", onPressed: busyEvent("clearSearch") },
+    ],
+  };
+  if (!items.length) {
+    return [head, { type: "EmptyState", key: "q-vacio", icon: "search", title: "Sin resultados", titleEn: "No results", text: `No hay títulos para “${query}”.`, textEn: `Nothing for “${query}”.` }];
+  }
+  return [head, { type: "titleGrid", key: "q-grid", columns: { compact: 3, expanded: 5 }, items: items.slice(0, 60) }];
+}
+
+// ── Ajustes dentro del plugin ──
+async function ajustesNodes(state) {
+  let estado = "Sin comprobación todavía";
+  try { const st = await settingsStatus(); estado = String((st && st.estado) || estado); } catch (_) { /* sin estado */ }
+  const idioma = String(kino.config.get("idioma") || "auto");
+  const nombre = { auto: "Automático", lat: "Latino", cast: "Castellano", sub: "Subtitulado" }[idioma] || "Automático";
+  const motor = puertaDisponible() ? "Instalado" : "No instalado";
+  const out = [];
+  if (state && state.aviso) {
+    out.push({ type: "MaterialBanner", key: "aviso", role: "info", margin: borde, text: String(state.aviso), textEn: String(state.aviso) });
+  }
+  out.push({
+    type: "Card", key: "aj-card", margin: borde, padding: 16, gap: 12,
+    children: [
+      { type: "Text", key: "aj-t", text: "CineHax+", style: "h4" },
+      { type: "Text", key: "aj-estado", text: estado, textEn: estado, color: "muted" },
+      { type: "Row", key: "aj-row-idioma", gap: 8, crossAxisAlignment: "center", children: [
+        { type: "Icon", key: "aj-i-idioma", name: "language", size: 20, color: "primary" },
+        { type: "Text", key: "aj-idioma", text: `Idioma preferido: ${nombre}`, textEn: `Preferred language: ${nombre}`, flex: 1 },
+      ] },
+      { type: "Row", key: "aj-row-motor", gap: 8, crossAxisAlignment: "center", children: [
+        { type: "Icon", key: "aj-i-motor", name: "bolt", size: 20, color: "primary" },
+        { type: "Text", key: "aj-motor", text: `Motor de reproducción: ${motor}`, textEn: `Playback engine: ${motor}`, flex: 1 },
+      ] },
+    ],
+  });
+  out.push({
+    type: "Row", key: "aj-acciones", gap: 12, wrap: true, margin: borde,
+    children: [
+      { type: "TextButton", key: "aj-comprobar", icon: "refresh", labelText: "Comprobar el sitio", labelTextEn: "Check the site", onPressed: busyEvent("comprobar") },
+      { type: "TextButton", key: "aj-limpiar", icon: "delete", labelText: "Borrar la caché", labelTextEn: "Clear cache", onPressed: busyEvent("limpiar") },
+    ],
+  });
+  out.push({ type: "Text", key: "aj-nota", color: "muted", style: "caption", margin: borde, text: "Los demás ajustes están en Ajustes ▸ Plugins ▸ CineHax+.", textEn: "The other settings are in Settings ▸ Plugins ▸ CineHax+." });
+  return out;
+}
+
+// La hoja de búsqueda: declarada en el árbol y abierta con `ui: [{ open: "buscar" }]`.
+const searchSheet = (query) => ({
+  type: "BottomSheet", key: "buscar", title: "Buscar", titleEn: "Search",
+  children: [
+    { type: "TextField", key: "sq", kind: "search", maxLength: 120, labelText: "Películas y series", labelTextEn: "Movies and series", trailingIcon: "search", trailingLabel: "Buscar", trailingLabelEn: "Search", onSubmitted: { event: "search" }, onTrailingTap: { event: "search" } },
+    ...(query ? [{ type: "TextButton", key: "sq-clear", labelText: "Quitar la búsqueda", labelTextEn: "Clear search", onPressed: busyEvent("clearSearch") }] : []),
+  ],
+});
 
 export async function screen(arg) {
   const state = (arg && arg.state) || {};
   const device = (arg && arg.device) || "phone";
   // El motor compartido resuelve los hosters: si falta, se ofrece instalarlo antes que enseñar el catálogo.
   const instalados = arg && arg.installed;
-  if (instalados && !instalados["xuper-plugin/kino-plugin-kino-resolver"]) return pantallaInstalar();
-  const tab = state.tab === "series" ? "series" : "peliculas";
-  const query = typeof state.query === "string" ? state.query.trim() : "";
+  if (instalados && !instalados["xuper-plugin/kino-plugin-kino-resolver"]) return pantallaInstalar(device);
+
+  const nav = navName(state.nav);
   const page = Math.max(1, Number(state.page) || 1);
-  let items = [];
-  let next = null;
-  let message = "";
+  const query = typeof state.query === "string" ? state.query.trim().slice(0, 120) : "";
 
-  try {
-    if (query) {
-      // search() espera un TitleContext ({ q, type, … }), no un string, y devuelve Item[].
-      const result = await search({ q: query, type: tab === "series" ? "series" : "movie" });
-      items = Array.isArray(result) ? result : (result && result.items) || [];
-    } else {
-      const result = await browse(screenListRef(tab), String(page));
-      items = (result && result.items) || [];
-      next = result && result.next;
-    }
-  } catch (err) {
-    message = "No se pudo cargar el catálogo. Inténtalo de nuevo.";
-    try { kino.log("screen catálogo: " + ((err && err.message) || err)); } catch (_) {}
-  }
+  let nodes;
+  if (query) nodes = await busquedaNodes(query);
+  else if (nav === "inicio") nodes = await inicioNodes();
+  else if (nav === "ajustes") nodes = await ajustesNodes(state);
+  else nodes = await listaNodes(nav, page, device);
+  if (!Array.isArray(nodes) || !nodes.length) nodes = [bannerError("No se pudo cargar el catálogo.", "Could not load the catalog.")];
 
-  const columns = device === "tv" ? 6 : device === "desktop" ? 5 : 3;
-  const visible = items.slice(0, SCREEN_PAGE_SIZE);
-  const controls = {
-    type: "row", key: "catalog-controls", gap: 8,
-    children: [
-      { type: "dropdown", key: "catalog-tab", labelText: "Catálogo", value: tab,
-        options: [{ value: "peliculas", label: "Películas" }, { value: "series", label: "Series" }],
-        onChanged: { event: "setTab" } },
-      { type: "textInput", key: "catalog-search", value: query, placeholder: "Buscar películas y series...", icon: "search", onChanged: { event: "search" } },
-    ],
-  };
+  const actions = [{ type: "IconButton", key: "abrir-buscar", icon: "search", labelText: "Buscar", labelTextEn: "Search", onPressed: { ui: [{ open: "buscar" }] } }];
 
-  const body = [controls];
-  if (message) {
-    body.push({ type: "emptyState", key: "catalog-error", icon: "error", title: "Catálogo no disponible", message });
-  } else if (!visible.length) {
-    body.push({ type: "emptyState", key: "catalog-empty", icon: "search_off", title: "Sin resultados", message: query ? `No hay títulos para “${query}”` : "No hay títulos disponibles ahora." });
-  } else {
-    body.push({ type: "titleGrid", key: `catalog-${tab}-${page}-${query || "all"}`, columns: { compact: 3, expanded: columns }, items: visible });
-    const nav = [];
-    if (!query && page > 1) nav.push({ type: "button", key: "previous", label: "« Anteriores", variant: "secondary", onTap: { event: "setPage", arg: String(page - 1) } });
-    if (!query) nav.push({ type: "text", key: "page-label", text: `Página ${page}`, variant: "caption", align: "center" });
-    if (!query && next) nav.push({ type: "button", key: "next", label: "Siguientes »", variant: "primary", onTap: { event: "setPage", arg: String(page + 1) } });
-    if (nav.length) body.push({ type: "row", key: "catalog-pagination", gap: 12, padding: { y: 8 }, children: nav });
-  }
-
-  return {
-    type: "scaffold", key: "cinehax-screen",
-    appBar: {
-      type: "appBar", key: "cinehax-appbar", title: "CineHax+", mergeWithKinoBar: true,
-      leading: { type: "button", key: "cinehax-close", icon: "arrow_back", label: "Cerrar", labelEn: "Close", variant: "icon", onTap: { go: { close: true } } },
+  const out = {
+    type: "Scaffold", key: "cinehax-screen",
+    appBar: appBarNode(nav, device, actions),
+    body: {
+      type: "Column", key: "cinehax-page", flex: 1,
+      children: [
+        busyBar(),
+        { type: "ListView", key: `cinehax-${nav}${query ? "-buscar" : ""}`, flex: 1, padding: { compact: { bottom: 16 }, expanded: { bottom: 24 } }, gap: 12, items: nodes },
+        searchSheet(query),
+      ],
     },
-    body: { type: "scroll", key: "cinehax-scroll", children: [{ type: "col", key: "cinehax-body", gap: 12, padding: { x: 16, y: 12 }, children: body }] },
   };
+  if (device !== "tv") out.bottomNavigationBar = navBar(nav);
+  return out;
 }
 
 export async function screenEvent(ev) {
   const event = ev || {};
-  const state = Object.assign({ tab: "peliculas", query: "", page: 1 }, event.state || {});
-  if (event.name === "setTab") {
-    state.tab = (event.value || event.arg) === "series" ? "series" : "peliculas";
+  const state = Object.assign({ nav: "inicio", page: 1, query: "", aviso: "" }, event.state || {});
+  state.nav = navName(state.nav);
+  const ui = [{ hide: "busy" }];
+  const name = String(event.name || "");
+
+  if (name === "nav") {
+    state.nav = navName(event.value !== undefined ? event.value : event.arg);
+    state.page = 1;
+    state.query = "";
+    state.aviso = "";
+  } else if (name === "search") {
+    const dicho = event.value !== undefined ? event.value
+      : (event.inputs && event.inputs.sq !== undefined ? event.inputs.sq : event.arg);
+    state.query = String(dicho == null ? "" : dicho).trim().slice(0, 120);
+    state.page = 1;
+    return { ui: [{ hide: "busy" }, { close: "buscar" }], state };   // la hoja se cierra al buscar
+  } else if (name === "clearSearch") {
     state.query = "";
     state.page = 1;
-  } else if (event.name === "search") {
-    state.query = typeof event.value === "string" ? event.value : (typeof event.arg === "string" ? event.arg : "");
-    state.page = 1;
-  } else if (event.name === "setPage") {
+  } else if (name === "setPage") {
     const n = Number(event.arg !== undefined ? event.arg : event.value);
     if (Number.isInteger(n) && n >= 1) state.page = n;
+  } else if (name === "comprobar" || name === "limpiar") {
+    try { const r = await action(name); state.aviso = (r && r.message) || ""; } catch (_) { state.aviso = ""; }
+  } else if (name === "reload") {
+    homeCache = { at: 0, rows: null };   // vuelve a pedir la portada
   }
-  return { state };
+  return { ui, state };
 }

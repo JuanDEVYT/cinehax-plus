@@ -468,21 +468,56 @@ test("panel: enseña la copia y las preferencias sin tocar la reproducción", as
   }
 });
 
+/** Todos los nodos del árbol de una pantalla (children, items y children de cada nodo). */
+function porTipo(nodo, tipo) {
+  if (!nodo || typeof nodo !== "object") return null;
+  if (Array.isArray(nodo)) {
+    for (const x of nodo) { const hit = porTipo(x, tipo); if (hit) return hit; }
+    return null;
+  }
+  if (nodo.type === tipo) return nodo;
+  for (const v of Object.values(nodo)) { const hit = porTipo(v, tipo); if (hit) return hit; }
+  return null;
+}
+
 test("pantalla: sin el motor compartido ofrece instalarlo", async () => {
   const sinMotor = await plugin.screen({ installed: { "xuper-plugin/kino-plugin-kino-resolver": false }, state: {}, device: "phone" });
   assert.equal(sinMotor.key, "cinehax-instalar");
   assert.ok(JSON.stringify(sinMotor).includes("installPlugin"), "el botón instala el motor");
+  assert.equal(sinMotor.appBar.mergeWithKinoBar, true);
 
   const conMotor = await plugin.screen({ installed: { "xuper-plugin/kino-plugin-kino-resolver": true }, state: {}, device: "phone" });
   assert.equal(conMotor.key, "cinehax-screen");
+  assert.equal(conMotor.appBar.mergeWithKinoBar, true);
+  assert.deepEqual(conMotor.bottomNavigationBar.items.map((i) => i.key), ["inicio", "peliculas", "series", "ajustes"]);
+  assert.equal(conMotor.bottomNavigationBar.value, "inicio");
+  assert.ok(conMotor.body.children.some((c) => c.type === "ListView"), "el contenido va en una lista perezosa");
+  assert.ok(conMotor.body.children.some((c) => c.type === "BottomSheet" && c.key === "buscar"), "la hoja de búsqueda va declarada");
+});
+
+test("pantalla: la barra navega, en TV pasa a TabBar y el hero reproduce", async () => {
+  const pelis = await plugin.screen({ state: { nav: "peliculas" }, device: "phone" });
+  assert.equal(pelis.bottomNavigationBar.value, "peliculas");
+  assert.ok(porTipo(pelis, "titleGrid"), "la rejilla de películas");
+
+  const tv = await plugin.screen({ state: { nav: "series" }, device: "tv" });
+  assert.equal(tv.bottomNavigationBar, undefined, "en TV no hay barra inferior");
+  assert.ok(JSON.stringify(tv.appBar).includes("TabBar"), "en TV la navegación es un TabBar");
+
+  const ev = await plugin.screenEvent({ name: "nav", value: "ajustes", state: { nav: "inicio" } });
+  assert.equal(ev.state.nav, "ajustes");
+  assert.ok(ev.ui.some((op) => op.hide === "busy"), "la respuesta esconde la barra de progreso");
 });
 
 test("pantalla: la búsqueda pinta la rejilla con lo que devuelve el sitio", async () => {
   const scr = await plugin.screen({ state: { query: "avatar" }, device: "phone" });
-  const col = scr.body.children[0];
-  const grid = col.children.find((c) => c.type === "titleGrid");
+  const grid = porTipo(scr, "titleGrid");
   assert.ok(grid && grid.items.length > 0, "la búsqueda de la pantalla ya no sale vacía");
-  assert.ok(!col.children.some((c) => c.type === "emptyState"));
+  assert.ok(!porTipo(scr, "EmptyState"));
+
+  const ev = await plugin.screenEvent({ name: "search", value: "avatar", state: { query: "" } });
+  assert.equal(ev.state.query, "avatar");
+  assert.ok(ev.ui.some((op) => op.close === "buscar"), "la hoja se cierra al buscar");
 });
 
 test("decodeRef: soporta URLs directas, IDs de tarjeta y slugs", async () => {
