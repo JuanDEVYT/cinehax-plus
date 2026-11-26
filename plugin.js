@@ -939,7 +939,10 @@ async function listaSana(url, opciones, contexto) {
     return !reason;
   } catch (err) {
     diagnostico("manifest_exception", Object.assign(meta, { elapsedMs: Date.now() - startedAt, error: String((err && err.message) || err) }));
-    return true;
+    // Un enlace de caché no se entrega si no se pudo comprobar: Kino tardaría ~10 s por cada
+    // alternativa al descubrir un 404. Para candidatos recién emitidos se conserva tolerancia
+    // ante un fallo transitorio del CDN.
+    return !(contexto && contexto.strictCache === true);
   }
 }
 
@@ -1107,7 +1110,7 @@ const ATTEMPT_MS = 5200;          // un servidor que no contesta en esto ya no i
 const MAX_SERVIDORES = 8;         // servidores que se prueban en una reproducción
 const MAX_ALTERNATIVAS = 8;       // copias que Kino enseña en "Servidor y calidad"
 const MAX_REF = 480;              // Kino descarta una copia cuya ref pase de 512
-const CACHE_OK = 30 * 60 * 1000;  // un enlace que funcionó vale media hora
+const CACHE_OK = 4 * 60 * 1000;   // los manifiestos firmados expiran pronto; nunca reutilizar durante media hora
 
 const restante = (hasta) => Math.max(0, hasta - Date.now());
 
@@ -1329,17 +1332,16 @@ async function capturaDelReproductor(watchUrl, hasta, contexto) {
   if (kino.browser && typeof kino.browser.capture === "function") {
     try {
       captured = await kino.browser.capture(url, {
-        timeoutMs: Math.min(18000, Math.max(6000, restante(hasta) - 2500)),
+        // Este host suele responder 401 tras un timeout; no desperdiciar 18 s cuando la API ya falló.
+        timeoutMs: Math.min(8000, Math.max(4500, restante(hasta) - 2500)),
         headers: { Referer: referer },
       });
     } catch (err) { diagnostico("browser_capture_error", Object.assign(context, { playerUrl: url, error: String((err && err.message) || err) })); captured = null; }
   }
-  if ((!captured || !captured.media || !captured.media.length) &&
-      kino.browser && typeof kino.browser.page === "function" && restante(hasta) > 8000) {
-    try {
-      captured = await kino.browser.page(url, { timeoutMs: Math.min(20000, restante(hasta) - 2000), autoplay: true });
-    } catch (err) { diagnostico("browser_page_error", Object.assign(context, { playerUrl: url, error: String((err && err.message) || err) })); captured = null; }
-  }
+  // `browser: true` autoriza capture(), no page(). Tras un capture sin medios, page() solo
+  // añadía hasta 20 s y acababa en 401/not_allowed contra api-encrypted.moviemaster.lat.
+  // Se termina rápido para que Kino muestre un error real, no una espera larga sin salida.
+
 
   const best = await mejorMedia(captured && captured.media, context);
   if (!best) {
@@ -1413,7 +1415,7 @@ async function resuelve(ref, permitirNavegador, limiteMs) {
   // 1) El enlace que ya funcionó para este título (30 min): una lista que aún responde se usa tal cual.
   const clave = `ok:${data.type}:${slug}:${data.season || ""}:${data.episode || ""}`;
   const bueno = leerBueno(clave);
-  if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} }, Object.assign(contexto, { source: "cache" }))) {
+  if (bueno && restante(hasta) > 4000 && await listaSana(bueno.url, { headers: bueno.headers || {} }, Object.assign(contexto, { source: "cache", strictCache: true }))) {
     kino.log(`flujo: enlace guardado de ${slug}`);
     // Las copias ya resueltas caducan con su token: del enlace guardado solo viajan las diferidas,
     // que se resuelven al elegirlas y llegan con token fresco.
